@@ -74,8 +74,14 @@
             <label class="radio"><input type="radio" name="detect_mode" value="local"> 本机直接检测（本系统部署在国内时使用）</label>
           </div>
           <div id="probes-block">
-            <h3>国内探针</h3>
-            <p class="muted">在一台国内机器上运行 <code>probe/probe.py</code>，填入地址与令牌。可添加多个，按成功率综合判断。</p>
+            <h3>主动上报探针（推荐，探针设备不需要公网 IP）</h3>
+            <p class="muted">适合家里的路由器（OpenWrt / iStoreOS）、NAS、树莓派等。探针定时主动连接本面板领取任务并上报结果。添加后点「安装命令」获取部署方法，然后保存设置。</p>
+            <div id="push-probes"></div>
+            <button type="button" class="btn small" id="add-push-probe">+ 添加主动上报探针</button>
+            <pre id="push-install" class="result hidden"></pre>
+
+            <h3>监听模式探针（探针需要公网 IP）</h3>
+            <p class="muted">在一台有公网 IP 的国内机器上运行 <code>probe/probe.py</code>，填入地址与令牌。可添加多个，所有探针按成功率综合判断。</p>
             <div id="probes"></div>
             <button type="button" class="btn small" id="add-probe">+ 添加探针</button>
           </div>

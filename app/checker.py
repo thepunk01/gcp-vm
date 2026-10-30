@@ -94,10 +94,13 @@ def probe_via_agent(agent: dict, host: str, port: int, timeout: float, tries: in
 
 
 class BlockChecker:
-    def __init__(self, settings: dict, agent_fn=probe_via_agent, tcp_fn=tcp_probe):
+    def __init__(self, settings: dict, agent_fn=probe_via_agent, tcp_fn=tcp_probe, push_hub=None):
         self.settings = settings
         self.agent_fn = agent_fn
         self.tcp_fn = tcp_fn
+        if push_hub is None:
+            from .pushprobe import HUB as push_hub  # 延迟导入，避免循环依赖
+        self.push_hub = push_hub
 
     def _local(self, source: str, host: str, port: int) -> ProbeResult:
         ok, latency, err = self.tcp_fn(
@@ -109,12 +112,17 @@ class BlockChecker:
         if self.settings.get("detect_mode") == "local":
             return [self._local("本机(国内)", host, port)]
         agents = [a for a in self.settings.get("probes") or [] if a.get("url")]
-        if not agents:
+        pushes = [p for p in self.settings.get("push_probes") or [] if p.get("token")]
+        if not agents and not pushes:
             return []
         timeout = float(self.settings["tcp_timeout"])
         tries = int(self.settings["tcp_tries"])
-        with ThreadPoolExecutor(max_workers=min(8, len(agents))) as pool:
+        with ThreadPoolExecutor(max_workers=min(8, len(agents) + len(pushes))) as pool:
             futures = [pool.submit(self.agent_fn, a, host, port, timeout, tries) for a in agents]
+            futures += [
+                pool.submit(self.push_hub.result, str(p.get("name") or "push"), host, port)
+                for p in pushes
+            ]
             return [f.result() for f in futures]
 
     def check(self, host: str, port: int) -> CheckResult:

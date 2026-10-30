@@ -52,6 +52,8 @@ DEFAULT_SETTINGS: dict = {
     "detect_mode": "agent",
     # 国内探针列表：[{"name": "上海电信", "url": "http://1.2.3.4:9800", "token": "xxx"}]
     "probes": [],
+    # 主动上报探针（适合没有公网 IP 的国内设备）：[{"name": "家里电信", "token": "xxx"}]
+    "push_probes": [],
     # 检测间隔（秒）
     "check_interval": 300,
     # 连续判定被墙多少次后才更换 IP（防误判）

@@ -82,7 +82,33 @@ python -m app               # 默认 http://0.0.0.0:8080
 
 ### 3. 部署国内探针（管理端在海外时必需）
 
-在任意一台 **中国大陆** 的机器（国内 VPS、家里的树莓派/NAS 均可）上运行，仅依赖 Python 3 标准库：
+探针仅依赖 Python 3 标准库，有两种模式：
+
+**主动上报模式（推荐，探针设备不需要公网 IP）**
+
+适合家里的路由器（OpenWrt / iStoreOS）、NAS、树莓派。探针每 20 秒左右主动连接面板，领取需要检测的 IP:端口，探测后上报结果。
+
+1. 面板「检测设置」→「+ 添加主动上报探针」，填名称（如 家里电信），令牌自动生成，点「保存设置」
+2. 点该探针的「安装命令」，按提示在设备上执行（探针脚本直接从面板 `/probe/probe.py` 下载，不依赖 GitHub）
+3. 在 OpenWrt / iStoreOS 上大致是：
+
+```bash
+opkg update && opkg install python3
+mkdir -p /root/gcpvm-probe && cd /root/gcpvm-probe
+wget -O probe.py http://面板地址:8080/probe/probe.py
+wget -O /etc/init.d/gcpvm-probe http://面板地址:8080/probe/gcpvm-probe.openwrt && chmod +x /etc/init.d/gcpvm-probe
+# 编辑 /etc/init.d/gcpvm-probe 中的 PANEL 与 TOKEN
+/etc/init.d/gcpvm-probe enable && /etc/init.d/gcpvm-probe start
+logread -e gcpvm    # 看到「已连接面板」即成功
+```
+
+4. 回到面板刷新「检测设置」，探针显示「在线」即可
+
+说明：面板缓存每个探针的最新结果（90 秒内有效）；新 IP（如手动「检测测试」或刚换的 IP）会登记为待测，等探针下一轮上报，通常 20 秒内出结果；探针超过 2 分钟未连接视为离线，不参与判断。
+
+**监听模式（探针需要公网 IP）**
+
+在一台有公网 IP 的 **中国大陆** 机器（国内 VPS 等）上运行：
 
 ```bash
 # 只需要 probe/probe.py 这一个文件
@@ -166,6 +192,9 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 | GET / PUT / DELETE | `/api/instances/{id}/startup-script` | 查看 / 写入 `{"script", "run_once", "reboot"}` / 清除启动脚本 |
 | GET | `/api/instances/{id}/serial-log?all=1` | 串口启动日志 |
 | GET | `/api/ssh-key` | 面板 SSH 公钥 |
+| GET | `/api/push-probes` | 主动上报探针在线状态 |
+| GET | `/api/probe-agent/tasks` | 探针领取任务（探针令牌鉴权） |
+| POST | `/api/probe-agent/report` | 探针上报结果（探针令牌鉴权） |
 | GET / PUT | `/api/settings` | 检测设置 |
 | POST | `/api/probe-test` | `{"host": "1.2.3.4", "port": 22}` |
 | POST | `/api/run-check` | 立即触发一轮检测 |
@@ -206,6 +235,8 @@ app/
   db.py            SQLite 存储
   web.py           Web API
   static/          Web 控制台
-probe/probe.py     国内探针（纯标准库）
+  pushprobe.py     主动上报探针的任务分发与结果缓存
+probe/probe.py     国内探针（纯标准库，监听 / 主动上报两种模式）
+probe/gcpvm-probe.openwrt  OpenWrt / iStoreOS 开机自启脚本
 tests/             单元测试（模拟 GCP，无需真实账号）
 ```

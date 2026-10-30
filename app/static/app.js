@@ -411,6 +411,46 @@ function probeRow(p = {}) {
   $("button", row).addEventListener("click", () => row.remove());
   return row;
 }
+const genToken = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+let pushStatus = {};
+function pushRow(p = {}) {
+  const row = document.createElement("div");
+  row.className = "push-row";
+  const st = pushStatus[p.name];
+  const badge = !p.name ? "" : st && st.online
+    ? `<span class="badge ok" title="上次连接 ${fmtTime(st.last_seen)}">在线</span>`
+    : `<span class="badge idle" title="${st && st.last_seen ? "上次连接 " + fmtTime(st.last_seen) : "尚未连接过"}">离线</span>`;
+  row.innerHTML = `<input placeholder="名称，如 家里电信" value="${esc(p.name)}" data-k="name">
+    <input value="${esc(p.token || genToken())}" data-k="token" class="mono-input" autocomplete="off" spellcheck="false">
+    <span>${badge}</span>
+    <button type="button" class="btn small" data-install>安装命令</button>
+    <button type="button" class="btn small danger" data-remove>移除</button>`;
+  $("[data-remove]", row).addEventListener("click", () => row.remove());
+  $("[data-install]", row).addEventListener("click", () => showInstall(row));
+  return row;
+}
+function showInstall(row) {
+  const token = $("[data-k=token]", row).value.trim();
+  const panel = location.origin;
+  const raw = `${panel}/probe`;
+  const out = $("#push-install");
+  out.textContent = [
+    "# 1) 在 iStoreOS / OpenWrt 上（SSH 登录路由器后执行）",
+    "opkg update && opkg install python3",
+    "mkdir -p /root/gcpvm-probe && cd /root/gcpvm-probe",
+    `wget -O probe.py ${raw}/probe.py`,
+    `wget -O /etc/init.d/gcpvm-probe ${raw}/gcpvm-probe.openwrt && chmod +x /etc/init.d/gcpvm-probe`,
+    `sed -i 's#^PANEL=.*#PANEL="${panel}"#; s#^TOKEN=.*#TOKEN="${token}"#' /etc/init.d/gcpvm-probe`,
+    "/etc/init.d/gcpvm-probe enable && /etc/init.d/gcpvm-probe start",
+    "logread -e gcpvm   # 看到「已连接面板」即成功",
+    "",
+    "# 2) 或在任意 Linux 上前台试运行",
+    `PROBE_PANEL=${panel} PROBE_TOKEN=${token} python3 probe.py`,
+    "",
+    "# 别忘了在本页点「保存设置」，否则令牌不生效",
+  ].join("\n");
+  out.classList.remove("hidden");
+}
 function toggleProbeBlock() {
   const mode = $("#settings-form").querySelector("[name=detect_mode]:checked")?.value;
   $("#probes-block").classList.toggle("hidden", mode === "local");
@@ -426,6 +466,11 @@ async function loadSettings() {
       if (!el) continue;
       if (el.type === "checkbox") el.checked = !!v; else el.value = v;
     }
+    try { pushStatus = Object.fromEntries((await api("/api/push-probes")).map((p) => [p.name, p])); } catch (_) { pushStatus = {}; }
+    const pbox = $("#push-probes");
+    pbox.innerHTML = "";
+    (s.push_probes || []).forEach((p) => pbox.appendChild(pushRow(p)));
+    $("#push-install").classList.add("hidden");
     const box = $("#probes");
     box.innerHTML = "";
     (s.probes || []).forEach((p) => box.appendChild(probeRow(p)));
@@ -435,6 +480,7 @@ async function loadSettings() {
 }
 $$("[name=detect_mode]").forEach((r) => r.addEventListener("change", toggleProbeBlock));
 $("#add-probe").addEventListener("click", () => $("#probes").appendChild(probeRow()));
+$("#add-push-probe").addEventListener("click", () => { const r = pushRow(); $("#push-probes").appendChild(r); $("[data-k=name]", r).focus(); });
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.currentTarget;
@@ -442,10 +488,11 @@ $("#settings-form").addEventListener("submit", async (e) => {
     detect_mode: f.querySelector("[name=detect_mode]:checked")?.value || "agent",
     control_check: f.control_check.checked,
     probes: $$(".probe-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.url),
+    push_probes: $$(".push-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.name || p.token),
   };
   for (const k of ["check_interval", "fail_threshold", "tcp_timeout", "tcp_tries", "cn_success_ratio", "cooldown_minutes", "max_changes_per_day"]) body[k] = +f.elements[k].value;
   for (const k of ["telegram_bot_token", "telegram_chat_id", "cf_api_token"]) body[k] = f.elements[k].value.trim();
-  await busy($("button[type=submit]", f), async () => { await api("/api/settings", { method: "PUT", body }); toast("设置已保存"); });
+  await busy($("button[type=submit]", f), async () => { await api("/api/settings", { method: "PUT", body }); toast("设置已保存"); loadSettings(); });
 });
 $("#probe-test-form").addEventListener("submit", async (e) => {
   e.preventDefault();

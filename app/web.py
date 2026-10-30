@@ -23,10 +23,13 @@ from .checker import BlockChecker
 from .db import Database
 from .gcp import GCPClient, GCPError, validate_service_account_key
 from .manager import Manager, ManagerError
+from .pushprobe import HUB
 from .remote import RemoteError
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
+PROBE_DIR = Path(__file__).parent.parent / "probe"
+PROBE_FILES = {"probe.py", "gcpvm-probe.openwrt", "gcpvm-probe.service"}
 
 
 # ---------------- auth ----------------
@@ -68,6 +71,14 @@ def create_app(
     manager = manager or Manager(db)
     auth = Auth(password if password is not None else config.ADMIN_PASSWORD, config.secret_key(), config.TOKEN_TTL_HOURS)
     run_monitor = config.ENABLE_MONITOR if enable_monitor is None else enable_monitor
+    HUB.configure(
+        db.get_settings,
+        lambda: [
+            (i["external_ip"], int(i["check_port"]))
+            for i in db.list_instances()
+            if i["status"] == "RUNNING" and i["external_ip"]
+        ],
+    )
 
     async def body(request: Request) -> dict:
         try:
@@ -96,6 +107,14 @@ def create_app(
     # ---- public ----
     async def index(_: Request):
         return FileResponse(STATIC_DIR / "index.html")
+
+    async def probe_file(request: Request):
+        # 供探针设备直接从面板下载（国内访问 GitHub 不稳定）
+        name = request.path_params.get("name", "")
+        path = PROBE_DIR / name
+        if name not in PROBE_FILES or not path.is_file():
+            raise HTTPException(404, "not found")
+        return FileResponse(path, media_type="text/plain; charset=utf-8")
 
     async def health(_: Request):
         return JSONResponse({"ok": True, "version": __version__})
@@ -243,6 +262,30 @@ def create_app(
         pub = await asyncio.to_thread(manager.ssh_key.ensure)
         return JSONResponse({"user": manager.ssh_key.user, "public_key": pub})
 
+    # ---- push probes (探针令牌鉴权，不走管理员登录) ----
+    def probe_name(request: Request) -> str:
+        header = request.headers.get("authorization", "")
+        name = HUB.authenticate(header[7:] if header.lower().startswith("bearer ") else "")
+        if not name:
+            raise HTTPException(401, "探针令牌无效")
+        return name
+
+    async def probe_tasks(request: Request):
+        name = probe_name(request)
+        return JSONResponse(await asyncio.to_thread(HUB.tasks, name))
+
+    async def probe_report(request: Request):
+        name = probe_name(request)
+        data = await body(request)
+        results = data.get("results")
+        if not isinstance(results, list):
+            raise HTTPException(400, "results 必须是列表")
+        return JSONResponse({"ok": True, "accepted": HUB.report(name, results)})
+
+    @protected
+    async def push_probe_status(_: Request):
+        return JSONResponse(HUB.status())
+
     # ---- events / settings / probes ----
     @protected
     async def events(request: Request):
@@ -279,6 +322,25 @@ def create_app(
                 for p in data["script_presets"]
                 if isinstance(p, dict) and str(p.get("name", "")).strip() and str(p.get("script", "")).strip()
             ][:50]
+        if "push_probes" in data:
+            if not isinstance(data["push_probes"], list):
+                raise ValueError("push_probes 必须是列表")
+            clean, names = [], set()
+            for p in data["push_probes"]:
+                if not isinstance(p, dict):
+                    continue
+                name, tok = str(p.get("name", "")).strip()[:40], str(p.get("token", "")).strip()
+                if not name and not tok:
+                    continue
+                if not name:
+                    raise ValueError("主动上报探针需要填写名称")
+                if len(tok) < 16:
+                    raise ValueError(f"探针「{name}」的令牌至少 16 位")
+                if name in names:
+                    raise ValueError(f"探针名称重复：{name}")
+                names.add(name)
+                clean.append({"name": name, "token": tok})
+            data["push_probes"] = clean
         if "probes" in data:
             if not isinstance(data["probes"], list):
                 raise ValueError("probes 必须是列表")
@@ -332,6 +394,7 @@ def create_app(
     routes = [
         Route("/", index),
         Route("/api/health", health),
+        Route("/probe/{name}", probe_file),
         Route("/api/login", login, methods=["POST"]),
         Route("/api/accounts", list_accounts),
         Route("/api/accounts", add_account, methods=["POST"]),
@@ -349,6 +412,9 @@ def create_app(
         Route("/api/jobs/{id}", get_job),
         Route("/api/jobs/{id}/cancel", cancel_job, methods=["POST"]),
         Route("/api/ssh-key", ssh_key),
+        Route("/api/probe-agent/tasks", probe_tasks),
+        Route("/api/probe-agent/report", probe_report, methods=["POST"]),
+        Route("/api/push-probes", push_probe_status),
         Route("/api/events", events),
         Route("/api/settings", get_settings),
         Route("/api/settings", put_settings, methods=["PUT"]),

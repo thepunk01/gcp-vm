@@ -46,7 +46,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 60px; }
 
 input, select, textarea { width: 100%; font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; margin-top: 4px; }
-textarea { font-family: var(--mono); font-size: 12.5px; }
+textarea, .mono-input { font-family: var(--mono); font-size: 12.5px; }
 input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent); border-color: var(--accent); }
 label { display: block; color: var(--muted); font-size: 13px; }
 label.check, label.radio { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
@@ -97,6 +97,8 @@ label.check input, label.radio input { width: auto; margin: 0; }
 
 .probe-row { display: grid; grid-template-columns: 1fr 2fr 2fr auto; gap: 8px; margin-bottom: 8px; }
 .probe-row input { margin: 0; }
+.push-row { display: grid; grid-template-columns: 1fr 2fr auto auto auto; gap: 8px; margin-bottom: 8px; align-items: center; }
+.push-row input { margin: 0; }
 .result { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; margin: 12px 0 0; }
 .empty { text-align: center; color: var(--muted); padding: 40px 0; background: var(--panel); border: 1px dashed var(--line); border-radius: var(--radius); }
 
@@ -133,6 +135,7 @@ dialog.wide { width: min(820px, calc(100vw - 32px)); }
   .grid2 { grid-template-columns: 1fr; }
   .span2 { grid-column: auto; }
   .probe-row { grid-template-columns: 1fr; }
+  .push-row { grid-template-columns: 1fr 1fr; }
   .topbar { flex-wrap: wrap; gap: 8px; padding: 10px 16px; }
   .tabs { order: 3; flex: 0 0 100%; }
   .topbar .brand { flex: 1; }

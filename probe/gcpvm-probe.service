@@ -1,0 +1,15 @@
+[Unit]
+Description=GCP-VM China probe agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PROBE_TOKEN=请替换为至少16位的随机字符串
+Environment=PROBE_PORT=9800
+ExecStart=/usr/bin/python3 /opt/gcpvm-probe/probe.py
+Restart=always
+RestartSec=5
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target

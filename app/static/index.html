@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GCP VM 管理</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- 登录 -->
+<section id="login-view" class="login hidden">
+  <form id="login-form" class="login-card">
+    <div class="brand"><span class="dot"></span>GCP VM 管理</div>
+    <p class="muted">实例管理 · IP 被墙自动更换</p>
+    <input id="login-password" type="password" placeholder="管理密码" autocomplete="current-password" required>
+    <button class="btn primary" type="submit">登录</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</section>
+
+<!-- 主界面 -->
+<section id="main-view" class="hidden">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span>GCP VM 管理</div>
+    <nav class="tabs">
+      <button data-tab="instances" class="active">实例</button>
+      <button data-tab="accounts">账号</button>
+      <button data-tab="settings">检测设置</button>
+      <button data-tab="events">事件日志</button>
+    </nav>
+    <button id="logout" class="btn ghost small">退出</button>
+  </header>
+
+  <main>
+    <!-- 实例 -->
+    <div id="tab-instances" class="tab">
+      <div class="toolbar">
+        <div class="stats" id="stats"></div>
+        <div class="toolbar-actions">
+          <button class="btn" id="btn-run-check">立即检测一轮</button>
+          <button class="btn primary" id="btn-sync">从 GCP 同步</button>
+        </div>
+      </div>
+      <div id="instances" class="cards"></div>
+    </div>
+
+    <!-- 账号 -->
+    <div id="tab-accounts" class="tab hidden">
+      <div class="panel">
+        <h2>GCP 服务账号</h2>
+        <p class="muted">在 GCP 控制台 → IAM → 服务账号 中创建密钥（JSON），角色建议授予 <code>Compute Admin</code>（或 <code>Compute Instance Admin (v1)</code> + 使用静态 IP 时再加 <code>Compute Network Admin</code>）。</p>
+        <table class="table" id="accounts-table">
+          <thead><tr><th>名称</th><th>项目</th><th>服务账号</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <form class="panel" id="account-form">
+        <h2>添加账号</h2>
+        <label>名称<input name="name" placeholder="可选，默认使用项目 ID"></label>
+        <label>密钥 JSON 文件<input type="file" id="key-file" accept=".json,application/json"></label>
+        <label>或粘贴密钥 JSON<textarea name="key" rows="6" placeholder='{"type": "service_account", ...}'></textarea></label>
+        <button class="btn primary" type="submit">验证并添加</button>
+      </form>
+    </div>
+
+    <!-- 设置 -->
+    <div id="tab-settings" class="tab hidden">
+      <form id="settings-form">
+        <div class="panel">
+          <h2>检测方式</h2>
+          <div class="radio-row">
+            <label class="radio"><input type="radio" name="detect_mode" value="agent"> 国内探针（本系统部署在海外时使用）</label>
+            <label class="radio"><input type="radio" name="detect_mode" value="local"> 本机直接检测（本系统部署在国内时使用）</label>
+          </div>
+          <div id="probes-block">
+            <h3>国内探针</h3>
+            <p class="muted">在一台国内机器上运行 <code>probe/probe.py</code>，填入地址与令牌。可添加多个，按成功率综合判断。</p>
+            <div id="probes"></div>
+            <button type="button" class="btn small" id="add-probe">+ 添加探针</button>
+          </div>
+        </div>
+
+        <div class="panel grid2">
+          <h2 class="span2">判定与频率</h2>
+          <label>检测间隔（秒）<input type="number" name="check_interval" min="30"></label>
+          <label>连续被墙次数阈值<input type="number" name="fail_threshold" min="1"></label>
+          <label>TCP 超时（秒）<input type="number" name="tcp_timeout" step="0.5" min="1"></label>
+          <label>每次检测重试次数<input type="number" name="tcp_tries" min="1" max="5"></label>
+          <label>国内可达率阈值（0-1）<input type="number" name="cn_success_ratio" step="0.1" min="0" max="1"></label>
+          <label class="check"><input type="checkbox" name="control_check"> 海外对照检测（海外也不通时不换 IP）</label>
+          <label>换 IP 冷却时间（分钟）<input type="number" name="cooldown_minutes" min="0"></label>
+          <label>每天最多自动换 IP 次数<input type="number" name="max_changes_per_day" min="0"></label>
+        </div>
+
+        <div class="panel grid2">
+          <h2 class="span2">通知与 DNS</h2>
+          <label>Telegram Bot Token<input name="telegram_bot_token" autocomplete="off"></label>
+          <label>Telegram Chat ID<input name="telegram_chat_id" autocomplete="off"></label>
+          <label class="span2">Cloudflare API Token（需 DNS 编辑权限，换 IP 后自动更新实例绑定的域名）<input name="cf_api_token" autocomplete="off"></label>
+        </div>
+        <div class="form-actions"><button class="btn primary" type="submit">保存设置</button></div>
+      </form>
+
+      <form class="panel" id="probe-test-form">
+        <h2>检测测试</h2>
+        <div class="inline">
+          <input name="host" placeholder="目标 IP，如 34.80.1.2" required>
+          <input name="port" type="number" value="22" min="1" max="65535" style="width:100px">
+          <button class="btn" type="submit">测试</button>
+        </div>
+        <pre id="probe-test-result" class="result hidden"></pre>
+      </form>
+    </div>
+
+    <!-- 日志 -->
+    <div id="tab-events" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar"><h2>事件日志</h2><button class="btn small" id="btn-events-refresh">刷新</button></div>
+        <table class="table" id="events-table">
+          <thead><tr><th style="width:160px">时间</th><th style="width:140px">实例</th><th style="width:90px">类型</th><th>内容</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</section>
+
+<!-- 实例设置弹窗 -->
+<dialog id="inst-dialog">
+  <form id="inst-form" method="dialog">
+    <h2 id="inst-dialog-title">实例设置</h2>
+    <label class="check"><input type="checkbox" name="auto_ip"> 被墙自动更换 IP</label>
+    <label class="check"><input type="checkbox" name="auto_start"> 关机/被回收时自动开机</label>
+    <label>检测端口（实例上开放的 TCP 端口，如 SSH 22 或代理端口）<input type="number" name="check_port" min="1" max="65535"></label>
+    <label>IP 类型
+      <select name="ip_mode">
+        <option value="ephemeral">临时 IP（推荐，免费，换 IP 即重新分配）</option>
+        <option value="static">静态 IP（换 IP 时新预留一个并释放旧的）</option>
+      </select>
+    </label>
+    <label>Cloudflare Zone ID<input name="dns_zone_id" placeholder="可选"></label>
+    <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选，如 node1.example.com"></label>
+    <label>备注<input name="note"></label>
+    <div class="form-actions">
+      <button class="btn ghost" value="cancel" formnovalidate>取消</button>
+      <button class="btn primary" value="save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

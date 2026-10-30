@@ -1,0 +1,10 @@
+services:
+  gcp-vm:
+    build: .
+    container_name: gcp-vm
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - ./data:/data

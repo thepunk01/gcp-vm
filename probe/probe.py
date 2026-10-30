@@ -169,14 +169,14 @@ def push_loop():
         try:
             n, interval = push_once()
             if not connected:
-                print(f"已连接面板，本轮检测 {n} 个目标", flush=True)
+                print(f"gcpvm: 已连接面板，本轮检测 {n} 个目标", flush=True)
                 connected = True
         except urllib.error.HTTPError as e:
             msg = "令牌无效，请核对面板「检测设置」里的令牌" if e.code == 401 else f"HTTP {e.code}"
-            print(f"连接面板失败：{msg}", file=sys.stderr, flush=True)
+            print(f"gcpvm: 连接面板失败：{msg}", file=sys.stderr, flush=True)
             connected, interval = False, 60
         except (OSError, ValueError) as e:
-            print(f"连接面板失败：{e}", file=sys.stderr, flush=True)
+            print(f"gcpvm: 连接面板失败：{e}", file=sys.stderr, flush=True)
             connected, interval = False, 30
         time.sleep(interval)
 

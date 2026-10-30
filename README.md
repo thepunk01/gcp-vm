@@ -21,6 +21,7 @@
 - **执行命令**：在面板里直接对实例执行安装/运维脚本
   - SSH 执行：以 root 执行 bash 脚本并实时显示输出，可停止；内置常用脚本（系统信息、更新系统、开启 BBR、安装 Docker），也可保存自己的
   - 启动脚本：写入实例元数据 `startup-script`，开机时自动执行（可选仅执行一次、写入后立即重启），可查看串口启动日志；SSH 连不上时也能用
+- **防火墙**：查看、新建、启用/禁用、删除项目的 VPC 防火墙规则，一键放行全部端口 / 80、443
 - **事件日志**：所有操作和检测结果可追溯
 
 ## 工作原理
@@ -51,6 +52,7 @@ GCP 控制台 → IAM 和管理 → 服务账号 → 创建服务账号 → 授�
 | 最简单 | `Compute Admin`（roles/compute.admin） |
 | 最小权限（仅临时 IP） | `Compute Instance Admin (v1)` |
 | 使用静态 IP 模式 | 再加 `Compute Network Admin`（用于预留/释放地址） |
+| 使用「防火墙」页 | `Compute Admin` 已包含；最小权限时需 `Compute Security Admin` |
 | 使用「执行命令」 | 再加 `Service Account User`（roles/iam.serviceAccountUser）。实例以服务账号身份运行时，修改其元数据（写 SSH 公钥、启动脚本）需要此角色 |
 
 也可以只对实例使用的服务账号授权（权限更小），在 Cloud Shell 执行：
@@ -192,6 +194,8 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 | GET / PUT / DELETE | `/api/instances/{id}/startup-script` | 查看 / 写入 `{"script", "run_once", "reboot"}` / 清除启动脚本 |
 | GET | `/api/instances/{id}/serial-log?all=1` | 串口启动日志 |
 | GET | `/api/ssh-key` | 面板 SSH 公钥 |
+| GET / POST | `/api/accounts/{id}/firewalls` | 列出防火墙规则与网络 / 新建 `{"name", "rules": "all 或 tcp:443 udp:443", "ranges", "direction", "action", "priority", "target_tags", "network"}` |
+| PATCH / DELETE | `/api/accounts/{id}/firewalls/{name}` | 启用/禁用 `{"disabled": true}` / 删除 |
 | GET | `/api/push-probes` | 主动上报探针在线状态 |
 | GET | `/api/probe-agent/tasks` | 探针领取任务（探针令牌鉴权） |
 | POST | `/api/probe-agent/report` | 探针上报结果（探针令牌鉴权） |
@@ -230,6 +234,7 @@ app/
   checker.py       被墙检测（国内探针 + 海外对照）
   manager.py       业务逻辑：同步、开关机、换 IP、自动检测循环、执行命令
   remote.py        SSH 密钥与远程执行、启动脚本封装
+  firewall.py      防火墙规则解析与展示
   jobs.py          命令任务与输出缓存
   integrations.py  Telegram 通知、Cloudflare DNS
   db.py            SQLite 存储

@@ -11,6 +11,7 @@ from . import config
 from .checker import STATE_BLOCKED, STATE_DOWN, STATE_OK, STATE_UNKNOWN, BlockChecker
 from .db import Database
 from .gcp import ClientPool, GCPClient, GCPError, region_of
+from .firewall import build_body, summarize
 from .integrations import DNSError, send_telegram, update_cloudflare_a_record
 from .jobs import Job, JobStore
 from .remote import (
@@ -459,3 +460,48 @@ class Manager:
         if only_startup:
             contents = filter_startup_log(contents)
         return {"contents": contents, "next": int(data.get("next", 0) or 0)}
+
+    # ---------------- firewall ----------------
+    def _account_client(self, account_id: int) -> tuple[dict, GCPClient]:
+        acc = self.db.get_account(account_id, with_key=False)
+        if not acc:
+            raise ManagerError("账号不存在")
+        return acc, self._client(account_id)
+
+    def list_firewalls(self, account_id: int) -> dict:
+        _, client = self._account_client(account_id)
+        try:
+            rules = [summarize(r) for r in client.list_firewalls()]
+            networks = client.list_networks()
+        except GCPError as e:
+            raise ManagerError(str(e)) from e
+        rules.sort(key=lambda r: (r["network"], r["direction"], r["priority"], r["name"]))
+        return {"rules": rules, "networks": networks}
+
+    def create_firewall(self, account_id: int, data: dict) -> None:
+        acc, client = self._account_client(account_id)
+        body = build_body(data)
+        try:
+            client.create_firewall(body)
+        except GCPError as e:
+            if "alreadyExists" in str(e) or "already exists" in str(e):
+                raise ManagerError(f"规则名称 {body['name']} 已存在") from e
+            raise ManagerError(str(e)) from e
+        s = summarize(body | {"network": body["network"]})
+        self._event(None, "firewall", f"[{acc['name']}] 新建防火墙规则 {body['name']}：{s['direction']} {s['action']} {s['rules']} 来自 {s['ranges']}", "warn")
+
+    def set_firewall_disabled(self, account_id: int, name: str, disabled: bool) -> None:
+        acc, client = self._account_client(account_id)
+        try:
+            client.patch_firewall(name, {"disabled": bool(disabled)})
+        except GCPError as e:
+            raise ManagerError(str(e)) from e
+        self._event(None, "firewall", f"[{acc['name']}] {'禁用' if disabled else '启用'}防火墙规则 {name}")
+
+    def delete_firewall(self, account_id: int, name: str) -> None:
+        acc, client = self._account_client(account_id)
+        try:
+            client.delete_firewall(name)
+        except GCPError as e:
+            raise ManagerError(str(e)) from e
+        self._event(None, "firewall", f"[{acc['name']}] 删除防火墙规则 {name}", "warn")

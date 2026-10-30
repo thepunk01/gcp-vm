@@ -25,6 +25,7 @@
     <div class="brand"><span class="dot"></span>GCP VM 管理</div>
     <nav class="tabs">
       <button data-tab="instances" class="active">实例</button>
+      <button data-tab="firewall">防火墙</button>
       <button data-tab="accounts">账号</button>
       <button data-tab="settings">检测设置</button>
       <button data-tab="events">事件日志</button>
@@ -43,6 +44,49 @@
         </div>
       </div>
       <div id="instances" class="cards"></div>
+    </div>
+
+    <!-- 防火墙 -->
+    <div id="tab-firewall" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <h2>防火墙规则</h2>
+          <div class="toolbar-actions">
+            <select id="fw-account" class="fw-account"></select>
+            <button class="btn small" id="fw-refresh">刷新</button>
+          </div>
+        </div>
+        <p class="muted small-note">规则作用于该项目整个 VPC 网络。GCP 默认只放行 SSH 22、RDP 3389 和 ICMP，其余端口需要在这里放行。删除 <code>default-allow-ssh</code> 会导致面板「SSH 执行」无法连接。</p>
+        <div class="table-wrap">
+          <table class="table" id="fw-table">
+            <thead><tr><th>名称</th><th>网络</th><th>方向</th><th>动作</th><th>协议 / 端口</th><th>来源 / 目标 IP</th><th>作用于</th><th>优先级</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <form class="panel grid2" id="fw-form">
+        <h2 class="span2">新建规则</h2>
+        <div class="span2 inline quick-row">
+          <span class="muted">快捷：</span>
+          <button type="button" class="btn small" data-quick="all">放行全部端口</button>
+          <button type="button" class="btn small" data-quick="web">放行 80 / 443</button>
+          <button type="button" class="btn small" data-quick="proxy">放行 TCP+UDP 全端口</button>
+        </div>
+        <label>名称<input name="name" placeholder="如 allow-proxy" required pattern="[a-z]([-a-z0-9]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头"></label>
+        <label>网络<select name="network"></select></label>
+        <label>方向
+          <select name="direction"><option value="INGRESS">入站（外部访问实例）</option><option value="EGRESS">出站（实例访问外部）</option></select>
+        </label>
+        <label>动作
+          <select name="action"><option value="allow">允许</option><option value="deny">拒绝</option></select>
+        </label>
+        <label class="span2">协议和端口<input name="rules" placeholder="all  或  tcp:443,8443,10000-20000 udp:443  或  icmp" required></label>
+        <label>来源 IP 范围（出站时为目标）<input name="ranges" value="0.0.0.0/0"></label>
+        <label>优先级（0-65535，越小越优先）<input name="priority" type="number" value="1000" min="0" max="65535"></label>
+        <label>目标网络标记（可选，留空作用于所有实例）<input name="target_tags" placeholder="如 proxy-server"></label>
+        <label>说明（可选）<input name="description"></label>
+        <div class="form-actions span2"><button class="btn primary" type="submit">创建规则</button></div>
+      </form>
     </div>
 
     <!-- 账号 -->

@@ -71,7 +71,7 @@ $$(".tabs button").forEach((b) => b.addEventListener("click", () => switchTab(b.
 function switchTab(name) {
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}`));
-  ({ instances: loadInstances, accounts: loadAccounts, settings: loadSettings, events: loadEvents })[name]();
+  ({ instances: loadInstances, firewall: loadFirewall, accounts: loadAccounts, settings: loadSettings, events: loadEvents })[name]();
 }
 
 // ---------------- instances ----------------
@@ -370,6 +370,102 @@ $("#serial-refresh").addEventListener("click", (e) => busy(e.currentTarget, asyn
   out.scrollTop = out.scrollHeight;
 }));
 
+// ---------------- firewall ----------------
+async function loadFirewall() {
+  const sel = $("#fw-account");
+  try {
+    const accounts = await api("/api/accounts");
+    const prev = sel.value;
+    sel.innerHTML = accounts.map((a) => `<option value="${a.id}">${esc(a.name)}（${esc(a.project_id)}）</option>`).join("");
+    if (!accounts.length) {
+      $("#fw-table tbody").innerHTML = `<tr><td colspan="9" class="muted">还没有账号，先到「账号」页添加</td></tr>`;
+      return;
+    }
+    if (prev && accounts.some((a) => String(a.id) === prev)) sel.value = prev;
+    await loadFirewallRules();
+  } catch (e) { toast(e.message, true); }
+}
+async function loadFirewallRules() {
+  const aid = $("#fw-account").value;
+  if (!aid) return;
+  const tbody = $("#fw-table tbody");
+  tbody.innerHTML = `<tr><td colspan="9" class="muted">加载中…</td></tr>`;
+  try {
+    const r = await api(`/api/accounts/${aid}/firewalls`);
+    const netSel = $("#fw-form").network;
+    const cur = netSel.value;
+    netSel.innerHTML = r.networks.map((n) => `<option>${esc(n)}</option>`).join("") || `<option>default</option>`;
+    if (r.networks.includes(cur)) netSel.value = cur; else if (r.networks.includes("default")) netSel.value = "default";
+    tbody.innerHTML = r.rules.length ? r.rules.map((f) => `<tr class="${f.disabled ? "disabled" : ""}" title="${esc(f.description)}">
+      <td>${esc(f.name)}${f.disabled ? ` <span class="badge idle">已禁用</span>` : ""}</td>
+      <td>${esc(f.network)}</td>
+      <td>${f.direction === "INGRESS" ? "入站" : "出站"}</td>
+      <td><span class="badge ${f.action === "allow" ? "ok" : "bad"}">${f.action === "allow" ? "允许" : "拒绝"}</span></td>
+      <td class="rules">${esc(f.rules)}</td>
+      <td class="rules">${esc(f.ranges)}</td>
+      <td>${esc(f.targets)}</td>
+      <td>${f.priority}</td>
+      <td class="ops"><button class="btn small" data-fw-toggle="${esc(f.name)}" data-disabled="${f.disabled ? 1 : 0}">${f.disabled ? "启用" : "禁用"}</button>
+        <button class="btn small danger" data-fw-del="${esc(f.name)}">删除</button></td>
+    </tr>`).join("") : `<tr><td colspan="9" class="muted">没有防火墙规则</td></tr>`;
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="error">${esc(e.message)}</td></tr>`;
+  }
+}
+$("#fw-account").addEventListener("change", loadFirewallRules);
+$("#fw-refresh").addEventListener("click", loadFirewallRules);
+$("#fw-table").addEventListener("click", async (e) => {
+  const aid = $("#fw-account").value;
+  const tog = e.target.closest("[data-fw-toggle]");
+  const del = e.target.closest("[data-fw-del]");
+  if (tog) {
+    const name = tog.dataset.fwToggle;
+    const disable = tog.dataset.disabled !== "1";
+    if (disable && name === "default-allow-ssh" && !confirm("禁用 default-allow-ssh 后，面板「SSH 执行」将无法连接实例，确定？")) return;
+    await busy(tog, async () => {
+      await api(`/api/accounts/${aid}/firewalls/${encodeURIComponent(name)}`, { method: "PATCH", body: { disabled: disable } });
+      toast(`已${disable ? "禁用" : "启用"} ${name}`);
+      await loadFirewallRules();
+    });
+  } else if (del) {
+    const name = del.dataset.fwDel;
+    const extra = name === "default-allow-ssh" ? "\n注意：删除后面板「SSH 执行」将无法连接实例！" : "";
+    if (!confirm(`删除防火墙规则「${name}」？${extra}`)) return;
+    await busy(del, async () => {
+      await api(`/api/accounts/${aid}/firewalls/${encodeURIComponent(name)}`, { method: "DELETE" });
+      toast(`已删除 ${name}`);
+      await loadFirewallRules();
+    });
+  }
+});
+const FW_QUICK = {
+  all: { name: "allow-all-ingress", rules: "all", description: "放行全部端口" },
+  web: { name: "allow-http-https", rules: "tcp:80,443 udp:443", description: "放行 80/443" },
+  proxy: { name: "allow-all-tcp-udp", rules: "tcp udp", description: "放行全部 TCP/UDP 端口" },
+};
+$$("[data-quick]").forEach((b) => b.addEventListener("click", () => {
+  const q = FW_QUICK[b.dataset.quick];
+  const f = $("#fw-form");
+  f.name.value = q.name; f.rules.value = q.rules; f.description.value = q.description;
+  f.direction.value = "INGRESS"; f.action.value = "allow"; f.ranges.value = "0.0.0.0/0"; f.priority.value = 1000; f.target_tags.value = "";
+  f.name.focus();
+}));
+$("#fw-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  const aid = $("#fw-account").value;
+  if (!aid) return toast("请先添加账号", true);
+  const body = Object.fromEntries(["name", "network", "direction", "action", "rules", "ranges", "priority", "target_tags", "description"].map((k) => [k, f.elements[k].value.trim()]));
+  if (body.action === "allow" && body.direction === "INGRESS" && body.rules.toLowerCase() === "all" && body.ranges.includes("0.0.0.0/0")
+      && !confirm("将对所有 IP 放行所有端口，实例上监听的所有服务都会暴露到公网，确定？")) return;
+  await busy($("button[type=submit]", f), async () => {
+    await api(`/api/accounts/${aid}/firewalls`, { method: "POST", body });
+    toast(`规则 ${body.name} 已创建，几秒内生效`);
+    f.name.value = ""; f.rules.value = ""; f.description.value = "";
+    await loadFirewallRules();
+  });
+});
+
 // ---------------- accounts ----------------
 async function loadAccounts() {
   try {
@@ -509,7 +605,7 @@ $("#probe-test-form").addEventListener("submit", async (e) => {
 });
 
 // ---------------- events ----------------
-const EVT = { exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
+const EVT = { firewall: "防火墙", exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
 async function loadEvents() {
   try {
     const rows = await api("/api/events?limit=300");

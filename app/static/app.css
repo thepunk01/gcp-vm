@@ -95,6 +95,13 @@ label.check input, label.radio input { width: auto; margin: 0; }
 .lvl-warn td:last-child { color: var(--warn); }
 .lvl-error td:last-child { color: var(--bad); }
 
+.table-wrap { overflow-x: auto; }
+#fw-table td { font-size: 13px; }
+#fw-table td.rules { font-family: var(--mono); font-size: 12px; }
+#fw-table tr.disabled td { opacity: .5; }
+#fw-table td.ops { white-space: nowrap; text-align: right; }
+.fw-account { width: auto; margin: 0; }
+.quick-row { flex-wrap: wrap; }
 .probe-row { display: grid; grid-template-columns: 1fr 2fr 2fr auto; gap: 8px; margin-bottom: 8px; }
 .probe-row input { margin: 0; }
 .push-row { display: grid; grid-template-columns: 1fr 2fr auto auto auto; gap: 8px; margin-bottom: 8px; align-items: center; }

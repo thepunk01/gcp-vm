@@ -154,6 +154,34 @@ def create_app(
         manager.pool.drop(aid)
         return JSONResponse({"ok": True})
 
+    # ---- firewall ----
+    @protected
+    async def list_firewalls(request: Request):
+        return JSONResponse(await asyncio.to_thread(manager.list_firewalls, int_param(request)))
+
+    @protected
+    async def create_firewall(request: Request):
+        aid = int_param(request)
+        data = await body(request)
+        await asyncio.to_thread(manager.create_firewall, aid, data)
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def update_firewall(request: Request):
+        aid = int_param(request)
+        data = await body(request)
+        if "disabled" not in data:
+            raise ValueError("只支持修改 disabled")
+        await asyncio.to_thread(
+            manager.set_firewall_disabled, aid, request.path_params["name"], bool(data["disabled"])
+        )
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def delete_firewall(request: Request):
+        await asyncio.to_thread(manager.delete_firewall, int_param(request), request.path_params["name"])
+        return JSONResponse({"ok": True})
+
     # ---- instances ----
     @protected
     async def list_instances(_: Request):
@@ -399,6 +427,10 @@ def create_app(
         Route("/api/accounts", list_accounts),
         Route("/api/accounts", add_account, methods=["POST"]),
         Route("/api/accounts/{id}", delete_account, methods=["DELETE"]),
+        Route("/api/accounts/{id}/firewalls", list_firewalls),
+        Route("/api/accounts/{id}/firewalls", create_firewall, methods=["POST"]),
+        Route("/api/accounts/{id}/firewalls/{name}", update_firewall, methods=["PATCH"]),
+        Route("/api/accounts/{id}/firewalls/{name}", delete_firewall, methods=["DELETE"]),
         Route("/api/instances", list_instances),
         Route("/api/sync", sync, methods=["POST"]),
         Route("/api/instances/{id}", update_instance, methods=["PATCH"]),

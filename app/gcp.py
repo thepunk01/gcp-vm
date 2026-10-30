@@ -274,6 +274,36 @@ class GCPClient:
         )
         self._wait(op)
 
+    # ---------------- firewall ----------------
+    def list_firewalls(self) -> list[dict]:
+        result: list[dict] = []
+        params: dict[str, Any] = {"maxResults": 500}
+        while True:
+            data = self._request("GET", f"projects/{self.project}/global/firewalls", params=params)
+            result.extend(data.get("items") or [])
+            token = data.get("nextPageToken")
+            if not token:
+                return result
+            params["pageToken"] = token
+
+    def list_networks(self) -> list[str]:
+        data = self._request("GET", f"projects/{self.project}/global/networks")
+        return [n["name"] for n in data.get("items") or []]
+
+    def create_firewall(self, body: dict) -> None:
+        op = self._request("POST", f"projects/{self.project}/global/firewalls", body=body)
+        self._wait(op)
+
+    def patch_firewall(self, name: str, body: dict) -> None:
+        op = self._request(
+            "PATCH", f"projects/{self.project}/global/firewalls/{quote(name)}", body=body
+        )
+        self._wait(op)
+
+    def delete_firewall(self, name: str) -> None:
+        op = self._request("DELETE", f"projects/{self.project}/global/firewalls/{quote(name)}")
+        self._wait(op)
+
     # ---------------- static addresses ----------------
     def find_address_by_ip(self, region: str, ip: str) -> dict | None:
         data = self._request(

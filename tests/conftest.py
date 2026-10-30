@@ -35,6 +35,13 @@ class FakeGCP:
         self.metadata = {}  # (zone, name) -> {key: value}
         self.project_metadata = {}
         self.serial = ""
+        self.firewalls = {
+            "default-allow-ssh": {
+                "name": "default-allow-ssh", "network": "https://x/global/networks/default",
+                "direction": "INGRESS", "priority": 65534, "sourceRanges": ["0.0.0.0/0"],
+                "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}],
+            }
+        }
         self.calls = []
         self.fail_add = False
 
@@ -97,6 +104,26 @@ class FakeGCP:
 
     def get_serial_output(self, zone, name, start=None):
         return {"contents": self.serial, "start": 0, "next": len(self.serial)}
+
+    def list_firewalls(self):
+        return list(self.firewalls.values())
+
+    def list_networks(self):
+        return ["default"]
+
+    def create_firewall(self, body):
+        from app.gcp import GCPError
+        if body["name"] in self.firewalls:
+            raise GCPError("POST firewalls 失败：HTTP 409 The resource 'x' already exists")
+        self.calls.append(("create_firewall", body["name"]))
+        self.firewalls[body["name"]] = dict(body)
+
+    def patch_firewall(self, name, body):
+        self.firewalls[name].update(body)
+
+    def delete_firewall(self, name):
+        self.calls.append(("delete_firewall", name))
+        del self.firewalls[name]
 
     def find_address_by_ip(self, region, ip):
         for n, a in self.addresses.items():

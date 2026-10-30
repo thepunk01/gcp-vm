@@ -110,3 +110,15 @@ def test_exec_api(db, fake_gcp, monkeypatch, tmp_path):
         presets = [{"name": "a", "script": "ls"}, {"name": "", "script": "x"}]
         s = c.put("/api/settings", json={"script_presets": presets}, headers=h).json()
         assert s["script_presets"] == [{"name": "a", "script": "ls"}]
+
+
+def test_firewall_api(client):
+    h = login(client)
+    aid = client.post("/api/accounts", json={"name": "main", "key": FAKE_KEY}, headers=h).json()["id"]
+    r = client.get(f"/api/accounts/{aid}/firewalls", headers=h).json()
+    assert r["rules"][0]["name"] == "default-allow-ssh"
+    assert client.post(f"/api/accounts/{aid}/firewalls", json={"name": "x", "rules": "tcp:0"}, headers=h).status_code == 400
+    assert client.post(f"/api/accounts/{aid}/firewalls", json={"name": "allow-all", "rules": "all"}, headers=h).status_code == 200
+    assert client.patch(f"/api/accounts/{aid}/firewalls/allow-all", json={"disabled": True}, headers=h).status_code == 200
+    assert client.delete(f"/api/accounts/{aid}/firewalls/allow-all", headers=h).status_code == 200
+    assert len(client.get(f"/api/accounts/{aid}/firewalls", headers=h).json()["rules"]) == 1

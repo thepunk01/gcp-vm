@@ -49,7 +49,7 @@
     <div id="tab-accounts" class="tab hidden">
       <div class="panel">
         <h2>GCP 服务账号</h2>
-        <p class="muted">在 GCP 控制台 → IAM → 服务账号 中创建密钥（JSON），角色建议授予 <code>Compute Admin</code>（或 <code>Compute Instance Admin (v1)</code> + 使用静态 IP 时再加 <code>Compute Network Admin</code>）。</p>
+        <p class="muted">在 GCP 控制台 → IAM → 服务账号 中创建密钥（JSON），角色建议授予 <code>Compute Admin</code>（或 <code>Compute Instance Admin (v1)</code> + 使用静态 IP 时再加 <code>Compute Network Admin</code>）。使用「执行命令」还需要 <code>Service Account User</code>。</p>
         <table class="table" id="accounts-table">
           <thead><tr><th>名称</th><th>项目</th><th>服务账号</th><th></th></tr></thead>
           <tbody></tbody>

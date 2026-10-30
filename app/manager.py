@@ -328,6 +328,17 @@ class Manager:
             raise ManagerError(f"脚本过长（上限 {MAX_SCRIPT_BYTES // 1024} KB）")
         return script
 
+    @staticmethod
+    def _explain(e: GCPError) -> str:
+        msg = str(e)
+        if "iam.serviceAccountUser" in msg or "does not have access to service account" in msg:
+            return (
+                "面板服务账号缺少「Service Account User」角色，无法修改以服务账号身份运行的实例的元数据。"
+                "请在 GCP 控制台 IAM 中为面板服务账号添加 roles/iam.serviceAccountUser 后重试。原始错误："
+                + msg
+            )
+        return msg
+
     def ensure_ssh_key(self, inst: dict, client: GCPClient | None = None) -> bool:
         """确保面板公钥已写入实例元数据，返回是否本次新写入。"""
         client = client or self._client(inst["account_id"])
@@ -344,7 +355,10 @@ class Manager:
         merged = merge_ssh_keys(meta.get("ssh-keys", ""), self.ssh_key.metadata_line())
         if merged is None:
             return False
-        client.set_metadata(inst["zone"], inst["name"], {"ssh-keys": merged})
+        try:
+            client.set_metadata(inst["zone"], inst["name"], {"ssh-keys": merged})
+        except GCPError as e:
+            raise ManagerError(self._explain(e)) from e
         self._event(inst, "exec", f"已写入面板 SSH 公钥（用户 {self.ssh_key.user}）")
         return True
 
@@ -426,8 +440,8 @@ class Manager:
                     self._event(inst, "startup", "已开机以执行启动脚本")
             return self._refresh(inst, client)
         except GCPError as e:
-            self._event(inst, "startup", f"写入启动脚本失败：{e}", "error")
-            raise ManagerError(str(e)) from e
+            self._event(inst, "startup", f"写入启动脚本失败：{self._explain(e)}", "error")
+            raise ManagerError(self._explain(e)) from e
         finally:
             lock.release()
 

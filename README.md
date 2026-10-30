@@ -51,6 +51,14 @@ GCP 控制台 → IAM 和管理 → 服务账号 → 创建服务账号 → 授�
 | 最简单 | `Compute Admin`（roles/compute.admin） |
 | 最小权限（仅临时 IP） | `Compute Instance Admin (v1)` |
 | 使用静态 IP 模式 | 再加 `Compute Network Admin`（用于预留/释放地址） |
+| 使用「执行命令」 | 再加 `Service Account User`（roles/iam.serviceAccountUser）。实例以服务账号身份运行时，修改其元数据（写 SSH 公钥、启动脚本）需要此角色 |
+
+也可以只对实例使用的服务账号授权（权限更小），在 Cloud Shell 执行：
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding 项目编号-compute@developer.gserviceaccount.com \
+  --member="serviceAccount:面板服务账号邮箱" --role="roles/iam.serviceAccountUser"
+```
 
 ### 2. 部署管理端（建议部署在海外服务器）
 

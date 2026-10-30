@@ -68,3 +68,45 @@ def test_bad_key(client):
     assert r.status_code == 400
     r = client.post("/api/accounts", json={"key": {"type": "x"}}, headers=h)
     assert r.status_code == 400
+
+
+def test_exec_api(db, fake_gcp, monkeypatch, tmp_path):
+    import time as _t
+
+    from app.remote import SSHKey
+
+    def runner(host, script, key_path, on_output, **kw):
+        on_output("out-" + script)
+        return 0
+
+    monkeypatch.setattr(web, "GCPClient", lambda key: fake_gcp)
+    mgr = Manager(db, FakePool(fake_gcp), ssh_key=SSHKey(tmp_path), ssh_runner=runner)
+    app = web.create_app(db=db, manager=mgr, password="pw123", enable_monitor=False)
+    with TestClient(app) as c:
+        h = login(c)
+        c.post("/api/accounts", json={"name": "main", "key": FAKE_KEY}, headers=h)
+        iid = c.get("/api/instances", headers=h).json()[0]["id"]
+
+        assert c.post(f"/api/instances/{iid}/exec", json={"script": ""}, headers=h).status_code == 400
+        job = c.post(f"/api/instances/{iid}/exec", json={"script": "ls"}, headers=h).json()
+        for _ in range(100):
+            r = c.get(f"/api/jobs/{job['id']}?offset=0", headers=h).json()
+            if r["status"] != "running":
+                break
+            _t.sleep(0.02)
+        assert r["status"] == "ok" and "out-ls" in r["output"]
+        tail = c.get(f"/api/jobs/{job['id']}?offset={r['offset']}", headers=h).json()
+        assert tail["output"] == ""
+        assert c.get(f"/api/jobs?instance_id={iid}", headers=h).json()[0]["id"] == job["id"]
+        assert c.get("/api/jobs/999", headers=h).status_code == 404
+
+        r = c.put(f"/api/instances/{iid}/startup-script", json={"script": "echo hi"}, headers=h)
+        assert r.status_code == 200, r.text
+        assert c.get(f"/api/instances/{iid}/startup-script", headers=h).json()["script"] == "echo hi"
+        assert c.delete(f"/api/instances/{iid}/startup-script", headers=h).status_code == 200
+        assert c.get(f"/api/instances/{iid}/serial-log", headers=h).status_code == 200
+        assert c.get("/api/ssh-key", headers=h).json()["public_key"].startswith("ssh-ed25519")
+
+        presets = [{"name": "a", "script": "ls"}, {"name": "", "script": "x"}]
+        s = c.put("/api/settings", json={"script_presets": presets}, headers=h).json()
+        assert s["script_presets"] == [{"name": "a", "script": "ls"}]

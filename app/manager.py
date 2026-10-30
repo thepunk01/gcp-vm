@@ -7,10 +7,23 @@ import threading
 import time
 from datetime import datetime
 
+from . import config
 from .checker import STATE_BLOCKED, STATE_DOWN, STATE_OK, STATE_UNKNOWN, BlockChecker
 from .db import Database
 from .gcp import ClientPool, GCPClient, GCPError, region_of
 from .integrations import DNSError, send_telegram, update_cloudflare_a_record
+from .jobs import Job, JobStore
+from .remote import (
+    MAX_SCRIPT_BYTES,
+    RemoteError,
+    SSHKey,
+    filter_startup_log,
+    merge_ssh_keys,
+    oslogin_enabled,
+    run_ssh,
+    unwrap_startup_script,
+    wrap_startup_script,
+)
 
 log = logging.getLogger(__name__)
 
@@ -23,10 +36,20 @@ class ManagerError(Exception):
 
 
 class Manager:
-    def __init__(self, db: Database, pool: ClientPool | None = None, checker_cls=BlockChecker):
+    def __init__(
+        self,
+        db: Database,
+        pool: ClientPool | None = None,
+        checker_cls=BlockChecker,
+        ssh_key: SSHKey | None = None,
+        ssh_runner=run_ssh,
+    ):
         self.db = db
         self.pool = pool or ClientPool()
         self.checker_cls = checker_cls
+        self.ssh_key = ssh_key or SSHKey(config.DATA_DIR)
+        self.ssh_runner = ssh_runner
+        self.jobs = JobStore()
         self._locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._cycle_lock = threading.Lock()
@@ -294,3 +317,131 @@ class Manager:
                     self._event(inst, "check", f"检测出错：{e}", "error")
         finally:
             self._cycle_lock.release()
+
+    # ---------------- remote exec (SSH) ----------------
+    @staticmethod
+    def _check_script(script: str) -> str:
+        script = (script or "").replace("\r\n", "\n")
+        if not script.strip():
+            raise ManagerError("脚本不能为空")
+        if len(script.encode()) > MAX_SCRIPT_BYTES:
+            raise ManagerError(f"脚本过长（上限 {MAX_SCRIPT_BYTES // 1024} KB）")
+        return script
+
+    def ensure_ssh_key(self, inst: dict, client: GCPClient | None = None) -> bool:
+        """确保面板公钥已写入实例元数据，返回是否本次新写入。"""
+        client = client or self._client(inst["account_id"])
+        meta = client.get_metadata(inst["zone"], inst["name"])
+        try:
+            project_meta = client.get_project_metadata()
+        except GCPError:
+            project_meta = {}
+        if oslogin_enabled(meta, project_meta):
+            raise ManagerError(
+                "该实例启用了 OS Login（enable-oslogin=TRUE），元数据 SSH 密钥不生效。"
+                "请在实例或项目元数据中把 enable-oslogin 设为 FALSE，或改用「启动脚本」"
+            )
+        merged = merge_ssh_keys(meta.get("ssh-keys", ""), self.ssh_key.metadata_line())
+        if merged is None:
+            return False
+        client.set_metadata(inst["zone"], inst["name"], {"ssh-keys": merged})
+        self._event(inst, "exec", f"已写入面板 SSH 公钥（用户 {self.ssh_key.user}）")
+        return True
+
+    def start_exec(self, instance_id: int, script: str, timeout: int = 600) -> Job:
+        """后台通过 SSH 执行脚本，立即返回任务，输出通过任务轮询获取。"""
+        script = self._check_script(script)
+        timeout = max(10, min(int(timeout or 600), 3600))
+        inst = self._instance(instance_id)
+        if inst["status"] != "RUNNING":
+            raise ManagerError("实例未运行，无法通过 SSH 执行。可改用「启动脚本」")
+        if not inst["external_ip"]:
+            raise ManagerError("实例没有外网 IP，无法 SSH 连接")
+        if self.jobs.running_for(instance_id):
+            raise ManagerError("该实例已有命令在执行，请等待完成或先停止")
+        job = self.jobs.create(instance_id, inst["name"], script)
+        threading.Thread(
+            target=self._exec_job, args=(job, inst, script, timeout), daemon=True, name=f"exec-{job.id}"
+        ).start()
+        return job
+
+    def _exec_job(self, job: Job, inst: dict, script: str, timeout: int) -> None:
+        first_line = next((ln.strip() for ln in script.splitlines() if ln.strip()), "")[:80]
+        try:
+            job.append(f"[gcpvm] 连接 {self.ssh_key.user}@{inst['external_ip']}…\n")
+            added = self.ensure_ssh_key(inst)
+            if added:
+                job.append("[gcpvm] 已写入 SSH 公钥，等待实例生效（通常 10-30 秒）…\n")
+            code = self.ssh_runner(
+                inst["external_ip"], script, self.ssh_key.private_path, job.append,
+                user=self.ssh_key.user, timeout=timeout,
+                auth_wait=120 if added else 30, cancelled=lambda: job.cancelled,
+            )
+            job.append(f"\n[gcpvm] 执行结束，退出码 {code}\n")
+            job.finish("ok" if code == 0 else "failed", code)
+            self._event(
+                inst, "exec", f"执行命令（{first_line}）完成，退出码 {code}",
+                "info" if code == 0 else "warn",
+            )
+        except (ManagerError, RemoteError, GCPError) as e:
+            status = "cancelled" if job.cancelled else "failed"
+            job.append(f"\n[gcpvm] {e}\n")
+            job.finish(status, error=str(e))
+            self._event(inst, "exec", f"执行命令（{first_line}）失败：{e}", "error")
+        except Exception as e:  # noqa: BLE001
+            log.exception("执行命令出错")
+            job.append(f"\n[gcpvm] 内部错误：{e}\n")
+            job.finish("failed", error=str(e))
+            self._event(inst, "exec", f"执行命令（{first_line}）出错：{e}", "error")
+
+    # ---------------- startup script ----------------
+    def get_startup_script(self, instance_id: int) -> dict:
+        inst = self._instance(instance_id)
+        meta = self._client(inst["account_id"]).get_metadata(inst["zone"], inst["name"])
+        script, run_once = unwrap_startup_script(meta.get("startup-script", ""))
+        return {"script": script, "run_once": run_once, "has_script": bool(script)}
+
+    def set_startup_script(
+        self, instance_id: int, script: str, run_once: bool = True, reboot: bool = False
+    ) -> dict:
+        script = self._check_script(script)
+        inst = self._instance(instance_id)
+        lock = self._lock_for(instance_id)
+        if not lock.acquire(timeout=1):
+            raise ManagerError("该实例正在执行其他操作，请稍后")
+        try:
+            client = self._client(inst["account_id"])
+            client.set_metadata(
+                inst["zone"], inst["name"], {"startup-script": wrap_startup_script(script, run_once)}
+            )
+            mode = "仅执行一次" if run_once else "每次开机执行"
+            self._event(inst, "startup", f"已写入启动脚本（{mode}）")
+            if reboot:
+                inst = self._refresh(inst, client)
+                if inst["status"] == "RUNNING":
+                    client.reset(inst["zone"], inst["name"])
+                    self._event(inst, "startup", "已重启实例以执行启动脚本", "warn")
+                elif inst["status"] in STOPPED_STATES:
+                    client.start(inst["zone"], inst["name"])
+                    self._event(inst, "startup", "已开机以执行启动脚本")
+            return self._refresh(inst, client)
+        except GCPError as e:
+            self._event(inst, "startup", f"写入启动脚本失败：{e}", "error")
+            raise ManagerError(str(e)) from e
+        finally:
+            lock.release()
+
+    def clear_startup_script(self, instance_id: int) -> None:
+        inst = self._instance(instance_id)
+        self._client(inst["account_id"]).set_metadata(
+            inst["zone"], inst["name"], {"startup-script": None}
+        )
+        self._event(inst, "startup", "已清除启动脚本")
+
+    def serial_log(self, instance_id: int, start: int | None = None, only_startup: bool = True) -> dict:
+        inst = self._instance(instance_id)
+        data = self._client(inst["account_id"]).get_serial_output(inst["zone"], inst["name"], start)
+        contents = data.get("contents", "")
+        if only_startup:
+            contents = filter_startup_log(contents)
+        return {"contents": contents, "next": int(data.get("next", 0) or 0)}

@@ -149,6 +149,62 @@
   </form>
 </dialog>
 
+<!-- 执行命令弹窗 -->
+<dialog id="exec-dialog" class="wide">
+  <div class="dialog-head">
+    <h2 id="exec-title">执行命令</h2>
+    <button class="btn small ghost" id="exec-close" type="button">关闭</button>
+  </div>
+  <nav class="subtabs">
+    <button type="button" data-sub="ssh" class="active">SSH 执行</button>
+    <button type="button" data-sub="startup">启动脚本</button>
+  </nav>
+
+  <div id="sub-ssh">
+    <p class="muted small-note">以 root 身份在实例上执行 bash 脚本，实时显示输出。首次执行会自动把面板公钥写入实例（用户 <code>gcpvm</code>），需要防火墙放行 22 端口。</p>
+    <div class="inline preset-row">
+      <select id="exec-preset"><option value="">— 常用脚本 —</option></select>
+      <button type="button" class="btn small" id="preset-save">存为常用</button>
+      <button type="button" class="btn small danger" id="preset-del">删除</button>
+    </div>
+    <textarea id="exec-script" rows="8" spellcheck="false" placeholder="例如：&#10;apt-get update&#10;apt-get install -y curl"></textarea>
+    <div class="inline exec-actions">
+      <label class="inline-label">超时
+        <select id="exec-timeout">
+          <option value="120">2 分钟</option>
+          <option value="600" selected>10 分钟</option>
+          <option value="1800">30 分钟</option>
+          <option value="3600">60 分钟</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <span id="exec-status" class="muted"></span>
+      <button type="button" class="btn small danger hidden" id="exec-stop">停止</button>
+      <button type="button" class="btn primary" id="exec-run">执行</button>
+    </div>
+    <pre id="exec-output" class="terminal hidden"></pre>
+  </div>
+
+  <div id="sub-startup" class="hidden">
+    <p class="muted small-note">把脚本写入实例元数据 <code>startup-script</code>，开机时由 GCP 自动执行。不依赖 SSH，SSH 连不上时也能用，但需要重启才会执行。</p>
+    <textarea id="startup-script" rows="8" spellcheck="false" placeholder="开机时执行的 bash 脚本"></textarea>
+    <div class="inline exec-actions">
+      <label class="check"><input type="checkbox" id="startup-once" checked> 仅执行一次</label>
+      <label class="check"><input type="checkbox" id="startup-reboot"> 写入后立即重启执行</label>
+      <span class="spacer"></span>
+      <button type="button" class="btn small danger" id="startup-clear">清除</button>
+      <button type="button" class="btn primary" id="startup-save">写入</button>
+    </div>
+    <div class="inline exec-actions">
+      <h3 class="log-title">启动日志（串口输出）</h3>
+      <span class="spacer"></span>
+      <label class="check"><input type="checkbox" id="serial-all"> 显示全部</label>
+      <button type="button" class="btn small" id="serial-refresh">刷新</button>
+    </div>
+    <pre id="serial-output" class="terminal">点「刷新」查看最近的启动脚本输出</pre>
+  </div>
+</dialog>
+
 <div id="toast"></div>
 <script src="/static/app.js"></script>
 </body>

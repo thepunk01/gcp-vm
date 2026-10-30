@@ -72,4 +72,30 @@ DEFAULT_SETTINGS: dict = {
     "telegram_chat_id": "",
     # Cloudflare DNS 自动更新
     "cf_api_token": "",
+    # 「执行命令」里的常用脚本：[{"name": "...", "script": "..."}]
+    "script_presets": [
+        {
+            "name": "查看系统信息",
+            "script": "uname -a\ngrep PRETTY_NAME /etc/os-release\nuptime\nfree -h\ndf -h /",
+        },
+        {
+            "name": "更新系统",
+            "script": (
+                "if command -v apt-get >/dev/null; then\n  apt-get update && apt-get -y upgrade\n"
+                "elif command -v dnf >/dev/null; then\n  dnf -y upgrade\nelse\n  yum -y update\nfi"
+            ),
+        },
+        {
+            "name": "开启 BBR",
+            "script": (
+                "cat >/etc/sysctl.d/99-bbr.conf <<'EOF'\nnet.core.default_qdisc=fq\n"
+                "net.ipv4.tcp_congestion_control=bbr\nEOF\nsysctl --system >/dev/null\n"
+                "sysctl net.ipv4.tcp_congestion_control"
+            ),
+        },
+        {
+            "name": "安装 Docker",
+            "script": "curl -fsSL https://get.docker.com | sh\nsystemctl enable --now docker\ndocker --version",
+        },
+    ],
 }

@@ -23,6 +23,7 @@ from .checker import BlockChecker
 from .db import Database
 from .gcp import GCPClient, GCPError, validate_service_account_key
 from .manager import Manager, ManagerError
+from .remote import RemoteError
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
@@ -82,7 +83,7 @@ def create_app(
             auth.verify(request)
             try:
                 return await handler(request)
-            except (ManagerError, ValueError, GCPError) as e:
+            except (ManagerError, ValueError, GCPError, RemoteError) as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
         return wrapper
 
@@ -173,6 +174,75 @@ def create_app(
             return JSONResponse({"instance": _clean(inst)})
         raise HTTPException(400, "不支持的操作")
 
+    # ---- remote exec / startup script ----
+    @protected
+    async def exec_command(request: Request):
+        iid = int_param(request)
+        data = await body(request)
+        job = await asyncio.to_thread(
+            manager.start_exec, iid, str(data.get("script", "")), int(data.get("timeout") or 600)
+        )
+        return JSONResponse(job.summary())
+
+    @protected
+    async def list_jobs(request: Request):
+        iid = request.query_params.get("instance_id")
+        return JSONResponse([j.summary() for j in manager.jobs.list(int(iid) if iid else None)])
+
+    @protected
+    async def get_job(request: Request):
+        job = manager.jobs.get(int_param(request))
+        if not job:
+            raise HTTPException(404, "任务不存在（面板重启后任务记录会清空）")
+        try:
+            offset = max(0, int(request.query_params.get("offset", 0)))
+        except ValueError:
+            offset = 0
+        text, end = job.output(offset)
+        return JSONResponse(job.summary() | {"output": text, "offset": end})
+
+    @protected
+    async def cancel_job(request: Request):
+        job = manager.jobs.get(int_param(request))
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        job.cancel()
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def get_startup(request: Request):
+        return JSONResponse(await asyncio.to_thread(manager.get_startup_script, int_param(request)))
+
+    @protected
+    async def put_startup(request: Request):
+        iid = int_param(request)
+        data = await body(request)
+        inst = await asyncio.to_thread(
+            manager.set_startup_script, iid, str(data.get("script", "")),
+            bool(data.get("run_once", True)), bool(data.get("reboot", False)),
+        )
+        return JSONResponse({"instance": _clean(inst)})
+
+    @protected
+    async def delete_startup(request: Request):
+        await asyncio.to_thread(manager.clear_startup_script, int_param(request))
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def serial_log(request: Request):
+        iid = int_param(request)
+        start = request.query_params.get("start")
+        only = request.query_params.get("all") != "1"
+        result = await asyncio.to_thread(
+            manager.serial_log, iid, int(start) if start not in (None, "") else None, only
+        )
+        return JSONResponse(result)
+
+    @protected
+    async def ssh_key(_: Request):
+        pub = await asyncio.to_thread(manager.ssh_key.ensure)
+        return JSONResponse({"user": manager.ssh_key.user, "public_key": pub})
+
     # ---- events / settings / probes ----
     @protected
     async def events(request: Request):
@@ -201,6 +271,14 @@ def create_app(
                 data[k] = float(data[k])
         if "detect_mode" in data and data["detect_mode"] not in ("agent", "local"):
             raise ValueError("detect_mode 只能是 agent 或 local")
+        if "script_presets" in data:
+            if not isinstance(data["script_presets"], list):
+                raise ValueError("script_presets 必须是列表")
+            data["script_presets"] = [
+                {"name": str(p.get("name", "")).strip()[:60], "script": str(p.get("script", ""))[:65536]}
+                for p in data["script_presets"]
+                if isinstance(p, dict) and str(p.get("name", "")).strip() and str(p.get("script", "")).strip()
+            ][:50]
         if "probes" in data:
             if not isinstance(data["probes"], list):
                 raise ValueError("probes 必须是列表")
@@ -262,6 +340,15 @@ def create_app(
         Route("/api/sync", sync, methods=["POST"]),
         Route("/api/instances/{id}", update_instance, methods=["PATCH"]),
         Route("/api/instances/{id}/action", instance_action, methods=["POST"]),
+        Route("/api/instances/{id}/exec", exec_command, methods=["POST"]),
+        Route("/api/instances/{id}/startup-script", get_startup),
+        Route("/api/instances/{id}/startup-script", put_startup, methods=["PUT"]),
+        Route("/api/instances/{id}/startup-script", delete_startup, methods=["DELETE"]),
+        Route("/api/instances/{id}/serial-log", serial_log),
+        Route("/api/jobs", list_jobs),
+        Route("/api/jobs/{id}", get_job),
+        Route("/api/jobs/{id}/cancel", cancel_job, methods=["POST"]),
+        Route("/api/ssh-key", ssh_key),
         Route("/api/events", events),
         Route("/api/settings", get_settings),
         Route("/api/settings", put_settings, methods=["PUT"]),

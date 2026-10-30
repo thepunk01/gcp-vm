@@ -190,6 +190,59 @@ class GCPClient:
     def reset(self, zone: str, name: str) -> dict:
         return self._instance_action(zone, name, "reset")
 
+    # ---------------- metadata / serial ----------------
+    @staticmethod
+    def metadata_items(meta: dict | None) -> dict[str, str]:
+        return {i["key"]: i.get("value", "") for i in (meta or {}).get("items") or []}
+
+    def get_metadata(self, zone: str, name: str) -> dict[str, str]:
+        return self.metadata_items(self.get_instance_raw(zone, name).get("metadata"))
+
+    def set_metadata(self, zone: str, name: str, updates: dict[str, str | None]) -> None:
+        """合并更新实例元数据（值为 None 表示删除该键），其余键保持不变。
+
+        setMetadata 需要带上最新 fingerprint，并发修改导致 412 时重读后重试。
+        """
+        for attempt in range(3):
+            meta = self.get_instance_raw(zone, name).get("metadata") or {}
+            items = self.metadata_items(meta)
+            for k, v in updates.items():
+                if v is None:
+                    items.pop(k, None)
+                else:
+                    items[k] = v
+            body = {
+                "fingerprint": meta.get("fingerprint"),
+                "items": [{"key": k, "value": v} for k, v in items.items()],
+            }
+            try:
+                op = self._request(
+                    "POST",
+                    f"projects/{self.project}/zones/{zone}/instances/{name}/setMetadata",
+                    body=body,
+                )
+            except GCPError as e:
+                if "HTTP 412" in str(e) and attempt < 2:
+                    continue
+                raise
+            self._wait(op)
+            return
+
+    def get_project_metadata(self) -> dict[str, str]:
+        data = self._request("GET", f"projects/{self.project}")
+        return self.metadata_items(data.get("commonInstanceMetadata"))
+
+    def get_serial_output(self, zone: str, name: str, start: int | None = None) -> dict:
+        """串口 1 输出（启动脚本日志会写到这里）。返回 {contents, start, next}。"""
+        params: dict[str, Any] = {"port": 1}
+        if start is not None:
+            params["start"] = start
+        return self._request(
+            "GET",
+            f"projects/{self.project}/zones/{zone}/instances/{name}/serialPort",
+            params=params,
+        )
+
     # ---------------- access config / ip ----------------
     def delete_access_config(self, zone: str, name: str, nic: str, ac_name: str) -> None:
         op = self._request(

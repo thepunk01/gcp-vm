@@ -128,6 +128,7 @@ function renderInstances() {
         ${running ? `<button class="btn small" data-act="reset">重启</button>` : ""}
         ${running ? `<button class="btn small" data-act="check">检测</button>` : ""}
         ${running ? `<button class="btn small danger" data-act="change_ip">换 IP</button>` : ""}
+        <button class="btn small ghost" data-act="exec">命令</button>
         <button class="btn small ghost" data-act="settings">设置</button>
       </div>
     </div>`;
@@ -152,6 +153,7 @@ $("#instances").addEventListener("click", async (e) => {
   const inst = instances.find((x) => x.id === id);
   const act = btn.dataset.act;
   if (act === "settings") return openSettings(inst);
+  if (act === "exec") return openExec(inst);
   if (CONFIRM[act] && !confirm(CONFIRM[act](inst))) return;
   await busy(btn, async () => {
     const r = await api(`/api/instances/${id}/action`, { method: "POST", body: { action: act } });
@@ -212,6 +214,161 @@ $("#inst-dialog").addEventListener("close", async () => {
     loadInstances();
   } catch (e) { toast(e.message, true); }
 });
+
+// ---- 执行命令弹窗 ----
+let execInst = null;
+let execJob = null;
+let execTimer = null;
+let presets = [];
+
+function switchSub(name) {
+  $$(".subtabs button").forEach((b) => b.classList.toggle("active", b.dataset.sub === name));
+  $("#sub-ssh").classList.toggle("hidden", name !== "ssh");
+  $("#sub-startup").classList.toggle("hidden", name !== "startup");
+  if (name === "startup") loadStartup();
+}
+$$(".subtabs button").forEach((b) => b.addEventListener("click", () => switchSub(b.dataset.sub)));
+
+function renderPresets() {
+  $("#exec-preset").innerHTML = `<option value="">— 常用脚本 —</option>` +
+    presets.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join("");
+}
+async function loadPresets() {
+  try { presets = (await api("/api/settings")).script_presets || []; renderPresets(); } catch (e) { toast(e.message, true); }
+}
+$("#exec-preset").addEventListener("change", (e) => {
+  const p = presets[+e.target.value];
+  if (p) $("#exec-script").value = p.script;
+});
+$("#preset-save").addEventListener("click", async () => {
+  const script = $("#exec-script").value;
+  if (!script.trim()) return toast("先输入脚本", true);
+  const name = prompt("常用脚本名称：");
+  if (!name || !name.trim()) return;
+  const next = presets.filter((p) => p.name !== name.trim()).concat([{ name: name.trim(), script }]);
+  try {
+    presets = (await api("/api/settings", { method: "PUT", body: { script_presets: next } })).script_presets;
+    renderPresets();
+    $("#exec-preset").value = String(presets.findIndex((p) => p.name === name.trim()));
+    toast("已保存为常用脚本");
+  } catch (e) { toast(e.message, true); }
+});
+$("#preset-del").addEventListener("click", async () => {
+  const i = $("#exec-preset").value;
+  if (i === "") return toast("先选择一个常用脚本", true);
+  if (!confirm(`删除常用脚本「${presets[+i].name}」？`)) return;
+  try {
+    presets = (await api("/api/settings", { method: "PUT", body: { script_presets: presets.filter((_, k) => k !== +i) } })).script_presets;
+    renderPresets();
+  } catch (e) { toast(e.message, true); }
+});
+
+function setExecRunning(on, statusText = "") {
+  $("#exec-run").disabled = on;
+  $("#exec-stop").classList.toggle("hidden", !on);
+  $("#exec-status").textContent = statusText;
+}
+
+async function openExec(inst) {
+  execInst = inst;
+  execJob = null;
+  clearTimeout(execTimer);
+  $("#exec-title").textContent = `执行命令 · ${inst.name}（${inst.external_ip || "无外网 IP"}）`;
+  $("#exec-output").textContent = "";
+  $("#exec-output").classList.add("hidden");
+  $("#serial-output").textContent = "点「刷新」查看最近的启动脚本输出";
+  setExecRunning(false);
+  switchSub(inst.status === "RUNNING" ? "ssh" : "startup");
+  $("#exec-dialog").showModal();
+  loadPresets();
+  // 若该实例已有任务在执行，接上输出
+  try {
+    const jobs = await api(`/api/jobs?instance_id=${inst.id}`);
+    const running = jobs.find((j) => j.status === "running");
+    if (running) attachJob(running.id);
+  } catch (_) {}
+}
+$("#exec-close").addEventListener("click", () => $("#exec-dialog").close());
+$("#exec-dialog").addEventListener("close", () => { clearTimeout(execTimer); execJob = null; });
+
+function attachJob(id) {
+  execJob = { id, offset: 0 };
+  const out = $("#exec-output");
+  out.textContent = "";
+  out.classList.remove("hidden");
+  setExecRunning(true, "执行中…");
+  pollJob();
+}
+async function pollJob() {
+  if (!execJob) return;
+  const job = execJob;
+  try {
+    const r = await api(`/api/jobs/${job.id}?offset=${job.offset}`);
+    if (execJob !== job) return;
+    const out = $("#exec-output");
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 30;
+    if (r.output) out.textContent += r.output;
+    if (atBottom) out.scrollTop = out.scrollHeight;
+    job.offset = r.offset;
+    if (r.status === "running") { execTimer = setTimeout(pollJob, 1000); return; }
+    const label = { ok: "执行成功", failed: "执行失败", cancelled: "已停止" }[r.status] || r.status;
+    setExecRunning(false, `${label}${r.exit_code !== null ? "，退出码 " + r.exit_code : ""}${r.truncated ? "（输出过长已截断）" : ""}`);
+    execJob = null;
+  } catch (e) {
+    setExecRunning(false, "");
+    toast(e.message, true);
+    execJob = null;
+  }
+}
+$("#exec-run").addEventListener("click", async () => {
+  const script = $("#exec-script").value;
+  if (!script.trim()) return toast("请输入要执行的命令", true);
+  try {
+    const job = await api(`/api/instances/${execInst.id}/exec`, { method: "POST", body: { script, timeout: +$("#exec-timeout").value } });
+    attachJob(job.id);
+  } catch (e) { toast(e.message, true); }
+});
+$("#exec-stop").addEventListener("click", async () => {
+  if (!execJob) return;
+  try { await api(`/api/jobs/${execJob.id}/cancel`, { method: "POST" }); $("#exec-status").textContent = "正在停止…"; }
+  catch (e) { toast(e.message, true); }
+});
+
+async function loadStartup() {
+  const inst = execInst;
+  try {
+    const r = await api(`/api/instances/${inst.id}/startup-script`);
+    if (execInst !== inst) return;
+    $("#startup-script").value = r.script;
+    $("#startup-once").checked = r.has_script ? r.run_once : true;
+  } catch (e) { toast(e.message, true); }
+}
+$("#startup-save").addEventListener("click", (e) => busy(e.currentTarget, async () => {
+  const script = $("#startup-script").value;
+  if (!script.trim()) throw new Error("请输入启动脚本");
+  const reboot = $("#startup-reboot").checked;
+  if (reboot && !confirm(`写入后将${execInst.status === "RUNNING" ? "强制重启" : "开机"}「${execInst.name}」，连接会中断，确定？`)) return;
+  await api(`/api/instances/${execInst.id}/startup-script`, {
+    method: "PUT", body: { script, run_once: $("#startup-once").checked, reboot },
+  });
+  toast(reboot ? "已写入并重启，稍后点「刷新」查看启动日志" : "已写入，下次开机时执行");
+  $("#startup-reboot").checked = false;
+  loadInstances();
+}));
+$("#startup-clear").addEventListener("click", (e) => {
+  if (!confirm("清除该实例的启动脚本？")) return;
+  busy(e.currentTarget, async () => {
+    await api(`/api/instances/${execInst.id}/startup-script`, { method: "DELETE" });
+    $("#startup-script").value = "";
+    toast("已清除启动脚本");
+  });
+});
+$("#serial-refresh").addEventListener("click", (e) => busy(e.currentTarget, async () => {
+  const r = await api(`/api/instances/${execInst.id}/serial-log${$("#serial-all").checked ? "?all=1" : ""}`);
+  const out = $("#serial-output");
+  out.textContent = r.contents.trim() || "暂无启动脚本输出（实例可能还没重启，或脚本尚未开始执行）";
+  out.scrollTop = out.scrollHeight;
+}));
 
 // ---------------- accounts ----------------
 async function loadAccounts() {
@@ -305,7 +462,7 @@ $("#probe-test-form").addEventListener("submit", async (e) => {
 });
 
 // ---------------- events ----------------
-const EVT = { start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
+const EVT = { exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
 async function loadEvents() {
   try {
     const rows = await api("/api/events?limit=300");
@@ -322,7 +479,7 @@ function start() {
   switchTab("instances");
   clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
-    if (!$("#tab-instances").classList.contains("hidden") && !$("#inst-dialog").open) loadInstances();
+    if (!$("#tab-instances").classList.contains("hidden") && !$("#inst-dialog").open && !$("#exec-dialog").open) loadInstances();
   }, 30000);
 }
 if (token) start(); else showMain(false);

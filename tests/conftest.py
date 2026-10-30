@@ -32,6 +32,9 @@ class FakeGCP:
             }
         }
         self.addresses = {}  # name -> {address, region}
+        self.metadata = {}  # (zone, name) -> {key: value}
+        self.project_metadata = {}
+        self.serial = ""
         self.calls = []
         self.fail_add = False
 
@@ -76,6 +79,24 @@ class FakeGCP:
         i = self.instances[(zone, name)]
         assert not i["ac"], "access config already exists"
         i["ac"], i["ip"] = ac_name, nat_ip or next(self.ip_seq)
+
+    def get_metadata(self, zone, name):
+        return dict(self.metadata.get((zone, name), {}))
+
+    def set_metadata(self, zone, name, updates):
+        self.calls.append(("set_metadata", tuple(sorted(updates))))
+        md = self.metadata.setdefault((zone, name), {})
+        for k, v in updates.items():
+            if v is None:
+                md.pop(k, None)
+            else:
+                md[k] = v
+
+    def get_project_metadata(self):
+        return dict(self.project_metadata)
+
+    def get_serial_output(self, zone, name, start=None):
+        return {"contents": self.serial, "start": 0, "next": len(self.serial)}
 
     def find_address_by_ip(self, region, ip):
         for n, a in self.addresses.items():

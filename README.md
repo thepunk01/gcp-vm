@@ -18,6 +18,9 @@
 - **自动开机**：Spot / 抢占式实例被回收或意外关机时自动拉起
 - **Cloudflare DNS**：换 IP 后自动更新绑定域名的 A 记录
 - **Telegram 通知**：换 IP、自动开机、失败等事件推送
+- **执行命令**：在面板里直接对实例执行安装/运维脚本
+  - SSH 执行：以 root 执行 bash 脚本并实时显示输出，可停止；内置常用脚本（系统信息、更新系统、开启 BBR、安装 Docker），也可保存自己的
+  - 启动脚本：写入实例元数据 `startup-script`，开机时自动执行（可选仅执行一次、写入后立即重启），可查看串口启动日志；SSH 连不上时也能用
 - **事件日志**：所有操作和检测结果可追溯
 
 ## 工作原理
@@ -101,6 +104,29 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
    - **检测端口** 填实例上实际开放的 TCP 端口（如代理服务端口或 SSH 22），并确认 GCP 防火墙已放行
    - 可选：填 Cloudflare Zone ID 与域名，换 IP 后自动更新 A 记录（需在检测设置中填 Cloudflare API Token）
 
+## 执行命令
+
+实例卡片上点「命令」打开执行窗口。
+
+**SSH 执行**
+
+- 面板首次使用时在数据目录生成一把 ed25519 密钥（`data/ssh/id_ed25519`），执行前自动把公钥写入实例元数据 `ssh-keys`（保留实例上原有的其他公钥）
+- GCP guest agent 会自动创建用户 `gcpvm` 并授予免密 sudo，脚本以 root 身份执行，`DEBIAN_FRONTEND=noninteractive`
+- 首次写入公钥后需要 10-30 秒生效，面板会自动等待重试
+- 要求：实例在运行、有外网 IP、防火墙放行 22 端口（默认网络自带 `default-allow-ssh` 规则）、未启用 OS Login（`enable-oslogin` 不为 TRUE）
+- 管理端部署在海外时，IP 被墙不影响 SSH 执行
+- 输出实时显示，最长保留 1 MB；可设置超时（2-60 分钟）或手动停止；同一实例同时只能有一个命令在执行
+- 任务记录保存在内存中，面板重启后清空（执行结果会写入事件日志）
+
+**启动脚本**
+
+- 写入实例元数据 `startup-script`，由 GCP 在每次开机时执行，不依赖 SSH
+- 勾选「仅执行一次」（默认）时，脚本成功执行后会在实例上留下标记 `/var/lib/gcpvm/startup-*.done`，之后开机不再执行；失败则下次开机重试
+- 勾选「写入后立即重启执行」会强制重启运行中的实例（关机的实例则开机）
+- 「启动日志」读取实例串口输出中与启动脚本相关的行，勾选「显示全部」可看完整串口日志
+
+> 安全提示：能登录面板就能以 root 在所有实例上执行命令，请使用强密码并为面板配置 HTTPS。
+
 ## 检测设置说明
 
 | 参数 | 默认 | 说明 |
@@ -126,6 +152,12 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 | POST | `/api/sync` | 从 GCP 同步实例 |
 | PATCH | `/api/instances/{id}` | 修改实例配置 `auto_ip, auto_start, check_port, ip_mode, dns_zone_id, dns_record, note` |
 | POST | `/api/instances/{id}/action` | `{"action": "start|stop|reset|change_ip|check|refresh"}` |
+| POST | `/api/instances/{id}/exec` | SSH 执行 `{"script": "...", "timeout": 600}` → 任务 |
+| GET | `/api/jobs/{id}?offset=0` | 任务状态与从 offset 起的新输出 |
+| POST | `/api/jobs/{id}/cancel` | 停止任务 |
+| GET / PUT / DELETE | `/api/instances/{id}/startup-script` | 查看 / 写入 `{"script", "run_once", "reboot"}` / 清除启动脚本 |
+| GET | `/api/instances/{id}/serial-log?all=1` | 串口启动日志 |
+| GET | `/api/ssh-key` | 面板 SSH 公钥 |
 | GET / PUT | `/api/settings` | 检测设置 |
 | POST | `/api/probe-test` | `{"host": "1.2.3.4", "port": 22}` |
 | POST | `/api/run-check` | 立即触发一轮检测 |
@@ -141,7 +173,7 @@ curl -X POST http://127.0.0.1:8080/api/instances/1/action \
 
 ## 注意事项
 
-- 服务账号密钥以明文保存在 `data/gcpvm.db`，请保护好数据目录与服务器
+- 服务账号密钥以明文保存在 `data/gcpvm.db`，面板 SSH 私钥保存在 `data/ssh/`，请保护好数据目录与服务器
 - 临时 IP 在实例 **关机** 时会被 GCP 回收，开机后 IP 会变化；需要固定 IP 请用静态 IP 模式（注意未绑定的静态 IP 会计费）
 - GCP 新分配的临时 IP 可能也在被墙网段中，系统会在下一轮检测后继续更换，直到达到每日上限
 - 更换 IP 会中断现有连接
@@ -159,7 +191,9 @@ pytest
 app/
   gcp.py           Compute Engine REST 客户端（服务账号 JWT 鉴权）
   checker.py       被墙检测（国内探针 + 海外对照）
-  manager.py       业务逻辑：同步、开关机、换 IP、自动检测循环
+  manager.py       业务逻辑：同步、开关机、换 IP、自动检测循环、执行命令
+  remote.py        SSH 密钥与远程执行、启动脚本封装
+  jobs.py          命令任务与输出缓存
   integrations.py  Telegram 通知、Cloudflare DNS
   db.py            SQLite 存储
   web.py           Web API

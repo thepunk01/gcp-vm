@@ -113,3 +113,28 @@ def test_access_config_calls():
     assert params == {"networkInterface": "nic0", "accessConfig": "external-nat"}
     _, _, params, body = s.log[2]
     assert body == {"name": "external-nat", "type": "ONE_TO_ONE_NAT", "networkTier": "STANDARD"}
+
+
+def test_set_metadata_merges_and_retries_on_412():
+    inst = dict(INST, metadata={"fingerprint": "fp1", "items": [
+        {"key": "ssh-keys", "value": "alice:ssh-rsa A alice"}, {"key": "startup-script", "value": "old"}]})
+
+    class Session(FakeSession):
+        attempts = 0
+
+        def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+            if url.endswith("/setMetadata"):
+                Session.attempts += 1
+                self.log.append((method, url, params, json))
+                if Session.attempts == 1:
+                    return Resp(412, {"error": {"message": "fingerprint mismatch"}})
+                return Resp(200, OP_DONE)
+            return super().request(method, url, params, json, headers, timeout)
+
+    s = Session([("GET", "/instances/vm1", Resp(200, inst))])
+    c = GCPClient(KEY, session=s)
+    c.set_metadata("asia-east1-b", "vm1", {"startup-script": None, "ssh-keys": "x:y z"})
+    bodies = [e[3] for e in s.log if e[0] == "POST"]
+    assert len(bodies) == 2  # 412 后重读重试
+    assert bodies[-1] == {"fingerprint": "fp1", "items": [{"key": "ssh-keys", "value": "x:y z"}]}
+    assert c.get_metadata("asia-east1-b", "vm1")["startup-script"] == "old"

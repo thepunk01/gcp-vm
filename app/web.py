@@ -15,7 +15,7 @@ import jwt
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -349,16 +349,48 @@ def create_app(
         script = await asyncio.to_thread(manager.traffic_agent_script, iid, str(data.get("panel_url", "")))
         return JSONResponse({"script": script})
 
-    async def public_traffic(request: Request):
+    def public_payload(key: str) -> dict | None:
         s = db.get_settings()
-        key = request.query_params.get("key", "")
         expected = s.get("status_page_key") or ""
         if not s.get("status_page_enabled") or not expected or not hmac.compare_digest(key.encode(), expected.encode()):
-            raise HTTPException(404, "not found")
+            return None
         groups = manager.traffic.groups(db.list_instances())
-        return JSONResponse(
-            {"title": s.get("status_page_title") or "实时速率", "groups": groups, "ts": time.time()},
-            headers={"Cache-Control": "no-store"},
+        return {"title": s.get("status_page_title") or "实时速率", "groups": groups, "ts": time.time()}
+
+    async def public_traffic(request: Request):
+        payload = public_payload(request.query_params.get("key", ""))
+        if payload is None:
+            raise HTTPException(404, "not found")
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    streams = {"n": 0}
+    MAX_STREAMS = 300
+
+    async def public_traffic_stream(request: Request):
+        """SSE：每秒推送一次各组速率。"""
+        key = request.query_params.get("key", "")
+        if public_payload(key) is None:
+            raise HTTPException(404, "not found")
+        if streams["n"] >= MAX_STREAMS:
+            raise HTTPException(503, "too many viewers")
+
+        async def gen():
+            streams["n"] += 1
+            try:
+                yield "retry: 3000\n\n"
+                while not await request.is_disconnected():
+                    payload = public_payload(key)
+                    if payload is None:
+                        yield "event: closed\ndata: {}\n\n"
+                        return
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(1)
+            finally:
+                streams["n"] -= 1
+
+        return StreamingResponse(
+            gen(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
     async def status_page(_: Request):
@@ -507,6 +539,7 @@ def create_app(
         Route("/api/health", health),
         Route("/status", status_page),
         Route("/api/public/traffic", public_traffic),
+        Route("/api/public/traffic/stream", public_traffic_stream),
         Route("/api/traffic-agent/report", traffic_report, methods=["POST"]),
         Route("/api/traffic", traffic_rates),
         Route("/api/instances/{id}/traffic-agent", traffic_agent, methods=["POST"]),

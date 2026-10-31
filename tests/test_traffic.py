@@ -19,14 +19,14 @@ def test_rates_and_groups():
     # 计数器重置（实例重启）时丢弃这一次，保留上次速率
     hub.report(1, 10, 10, now=110)
     assert hub.instance_rate(1, now=111)["rx_bps"] == 1_000_000
-    # 超过 20 秒未上报视为离线
+    # 超过 10 秒未上报视为离线
     assert hub.instance_rate(1, now=200) == {"online": False, "rx_bps": 0, "tx_bps": 0, "last_seen": 110}
 
     hub.report(2, 0, 0, now=100)
     hub.report(2, 625_000, 0, now=105)  # 1 Mbps
     insts = [{"id": 1, "grp": "香港"}, {"id": 2, "grp": "香港"}, {"id": 3, "grp": "东京"}, {"id": 4, "grp": ""}]
     hub.report(1, 10 + 125_000 * 5, 10, now=115)  # 1 Mbps rx
-    groups = hub.groups(insts, now=130)
+    groups = hub.groups(insts, now=122)
     assert [g["name"] for g in groups] == ["东京", "香港"]
     hk = groups[1]
     assert hk == {"name": "香港", "total": 2, "online": 1, "rx_bps": 1_000_000, "tx_bps": 0}  # 2 号已超时
@@ -80,3 +80,8 @@ def test_manager_report_and_migration(tmp_path, fake_gcp):
     assert mgr.traffic_report(token, 100, 200) is True
     with pytest.raises(ManagerError):
         mgr.traffic_report(token, -1, 2)
+
+
+def test_agent_reports_every_second():
+    script = agent_install_script("https://p.example.com", "b" * 32)
+    assert "sleep 1\n" in script and "-A \"gcpvm-traffic/1.1\"" in script

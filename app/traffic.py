@@ -1,6 +1,6 @@
 """实例实时流量：VM 上报脚本、速率计算、按组汇总。
 
-每台实例上运行一个很小的 bash 脚本（systemd 服务），每 5 秒把默认出口网卡的
+每台实例上运行一个很小的 bash 脚本（systemd 服务），每秒把默认出口网卡的
 累计收发字节数上报到面板；面板用相邻两次的差值计算速率（bit/s）。
 """
 
@@ -10,8 +10,8 @@ import re
 import threading
 import time
 
-REPORT_INTERVAL = 5
-ONLINE_SECONDS = 20
+REPORT_INTERVAL = 1
+ONLINE_SECONDS = 10
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?$|^https?://\[[0-9A-Fa-f:]+\](:\d{1,5})?$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{32,64}$")
 
@@ -24,7 +24,7 @@ while true; do
   [ -n "$IF" ] || IF=$(awk -F: 'NR>2 {gsub(/ /,"",$1); if ($1!="lo") {print $1; exit}}' /proc/net/dev)
   set -- $(sed 's/:/ /' /proc/net/dev | awk -v i="$IF" '$1==i {print $2, $10}')
   if [ -n "$1" ] && [ -n "$2" ]; then
-    curl -fsS -m 4 --connect-timeout 3 -o /dev/null -X POST "$URL" \
+    curl -fsS -m 3 --connect-timeout 2 -A "gcpvm-traffic/1.1" -o /dev/null -X POST "$URL" \
       -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
       -d "{\"rx\":$1,\"tx\":$2,\"iface\":\"$IF\"}" || true
   fi
@@ -104,7 +104,7 @@ class TrafficHub:
             if not prev:
                 return
             dt = now - prev[0]
-            if dt < 0.5 or dt > 60 or rx < prev[1] or tx < prev[2]:
+            if dt < 0.3 or dt > 60 or rx < prev[1] or tx < prev[2]:
                 return  # 间隔异常或计数器重置（重启），丢弃这一次
             self._rates[instance_id] = ((rx - prev[1]) * 8 / dt, (tx - prev[2]) * 8 / dt)
 

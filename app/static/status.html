@@ -65,7 +65,7 @@ if (params.get("bg")) {
   const bg = params.get("bg");
   if (/^(transparent|#[0-9a-fA-F]{3,8})$/.test(bg)) document.documentElement.style.setProperty("--bg", bg);
 }
-const HISTORY = 36;
+const HISTORY = 60;
 const history = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -114,34 +114,57 @@ function render(data) {
     </div>`;
   }).join("");
 }
-let fails = 0;
-async function tick() {
-  try {
-    const key = params.get("key") || "";
-    const res = await fetch(`/api/public/traffic?key=${encodeURIComponent(key)}`, { cache: "no-store" });
-    if (res.status === 404) {
-      document.getElementById("grid").innerHTML = "";
-      const msg = document.getElementById("msg");
-      msg.textContent = "速率页未开启或链接无效";
-      msg.hidden = false;
-      document.getElementById("updated").textContent = "";
-      return setTimeout(tick, 30000);
-    }
-    const data = await res.json();
-    render(data);
-    fails = 0;
-    document.getElementById("live").classList.remove("stale");
-    document.getElementById("updated").textContent = "实时 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  } catch (_) {
-    fails += 1;
-    if (fails >= 2) {
-      document.getElementById("live").classList.add("stale");
-      document.getElementById("updated").textContent = "连接中断，重试中…";
-    }
-  }
-  setTimeout(tick, 5000);
+const key = params.get("key") || "";
+const $id = (id) => document.getElementById(id);
+function showLive(ok, text) {
+  $id("live").classList.toggle("stale", !ok);
+  $id("updated").textContent = text;
 }
-tick();
+function onData(data) {
+  render(data);
+  showLive(true, "实时 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false }));
+}
+function showInvalid() {
+  $id("grid").innerHTML = "";
+  $id("msg").textContent = "速率页未开启或链接无效";
+  $id("msg").hidden = false;
+  showLive(false, "");
+}
+// 先用普通请求确认链接有效，再建立 SSE 推送（每秒一次）；SSE 不可用时退回每 2 秒轮询
+let es = null;
+let pollTimer = null;
+async function check() {
+  try {
+    const res = await fetch(`/api/public/traffic?key=${encodeURIComponent(key)}`, { cache: "no-store" });
+    if (res.status === 404) { showInvalid(); return false; }
+    onData(await res.json());
+    return true;
+  } catch (_) {
+    showLive(false, "连接中断，重试中…");
+    return null;
+  }
+}
+async function start() {
+  clearTimeout(pollTimer);
+  const ok = await check();
+  if (ok === false) return void (pollTimer = setTimeout(start, 30000));
+  if (ok === null) return void (pollTimer = setTimeout(start, 3000));
+  if (!window.EventSource) return poll();
+  let gotData = false;
+  es = new EventSource(`/api/public/traffic/stream?key=${encodeURIComponent(key)}`);
+  es.onmessage = (e) => { gotData = true; try { onData(JSON.parse(e.data)); } catch (_) {} };
+  es.addEventListener("closed", () => { es.close(); showInvalid(); pollTimer = setTimeout(start, 30000); });
+  es.onerror = () => {
+    showLive(false, "连接中断，重试中…");
+    if (!gotData) { es.close(); poll(); }  // 推送被代理拦截：改为轮询
+  };
+}
+async function poll() {
+  const ok = await check();
+  if (ok === false) return void (pollTimer = setTimeout(start, 30000));
+  pollTimer = setTimeout(poll, 2000);
+}
+start();
 </script>
 </body>
 </html>

@@ -156,12 +156,12 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 
 ## 实时速率与公开速率页
 
-1. **安装流量上报**：实例「命令」→「填入安装脚本」→「执行」。会在实例上安装 `gcpvm-traffic` systemd 服务（一个 bash 脚本，每 5 秒用 curl 上报默认出口网卡的累计收发字节数，几乎不占资源）。上报地址默认是你当前打开面板用的地址，实例需要能访问到它。卸载：「填入卸载脚本」→「执行」
+1. **安装流量上报**：实例「命令」→「填入安装脚本」→「执行」。会在实例上安装 `gcpvm-traffic` systemd 服务（一个 bash 脚本，每秒用 curl 上报默认出口网卡的累计收发字节数，几乎不占资源）。上报地址默认是你当前打开面板用的地址，实例需要能访问到它。卸载：「填入卸载脚本」→「执行」
 2. **设置分组**：实例「设置」→「分组」，例如 `香港入口`。组名建议和转发面板里的设备组一致
 3. **开启公开速率页**：「检测设置」→「公开速率页」，勾选开启（自动生成访问密钥），保存设置，复制嵌入代码
 4. **嵌入 NY 面板**：把嵌入代码（`<iframe …>`）粘到 NY 后台「站点公告」并保存，用户登录后在主页即可看到每个组的实时速率
 
-速率页只显示组名、在线节点数和合计上下行速率，不包含 IP 和实例名；没有设置分组的实例不会出现。速率按实例网卡计算（bit/s），实例超过 20 秒未上报视为离线。
+速率页只显示组名、在线节点数和合计上下行速率，不包含 IP 和实例名；没有设置分组的实例不会出现。速率按实例网卡计算（bit/s），实例超过 10 秒未上报视为离线。速率页通过 SSE 每秒推送更新（被代理拦截时自动退回每 2 秒轮询）。
 
 > NY 面板是 HTTPS 时，浏览器会拦截 HTTP 的 iframe，所以本面板也需要 HTTPS 访问（例如用 Caddy 反代：`gcpvm.你的域名 { reverse_proxy 127.0.0.1:8080 }`），并用 HTTPS 地址生成嵌入代码和安装上报脚本。
 
@@ -229,6 +229,7 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 | GET | `/api/traffic` | 各实例实时速率 |
 | POST | `/api/traffic-agent/report` | 实例上报流量（实例令牌鉴权） |
 | GET | `/api/public/traffic?key=` | 公开速率数据（按组，需开启并带密钥） |
+| GET | `/api/public/traffic/stream?key=` | 同上，SSE 每秒推送 |
 | GET | `/status?key=&theme=light\|dark\|auto` | 公开速率页（可 iframe 嵌入） |
 | GET | `/api/push-probes` | 主动上报探针在线状态 |
 | GET | `/api/probe-agent/tasks` | 探针领取任务（探针令牌鉴权） |

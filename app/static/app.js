@@ -778,7 +778,7 @@ function start() {
   switchTab("instances");
   clearInterval(refreshTimer);
   clearInterval(window.__rateTimer);
-  window.__rateTimer = setInterval(() => { if (!$("#tab-instances").classList.contains("hidden")) loadRates(); }, 5000);
+  window.__rateTimer = setInterval(() => { if (!$("#tab-instances").classList.contains("hidden")) loadRates(); }, 2000);
   refreshTimer = setInterval(() => {
     if (!$("#tab-instances").classList.contains("hidden") && !$("#inst-dialog").open && !$("#exec-dialog").open && !$("#create-dialog").open) loadInstances();
   }, 30000);

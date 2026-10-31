@@ -685,10 +685,20 @@ function statusEmbed() {
   const key = f.status_page_key.value.trim();
   const url = `${location.origin}/status?key=${encodeURIComponent(key)}&theme=${$("#status-theme").value}`;
   $("#status-open").href = url;
-  $("#status-embed").value = `<iframe src="${url}" width="100%" height="${+$("#status-height").value || 190}" style="border:0;display:block" loading="lazy"></iframe>`;
+  $("#status-embed").value = `<iframe src="${url}" width="100%" height="${+$("#status-height").value || 260}" style="border:0;display:block" loading="lazy"></iframe>`;
 }
 $("#status-key-gen").addEventListener("click", () => { $("#settings-form").status_page_key.value = genToken(); statusEmbed(); });
 ["#status-theme", "#status-height"].forEach((s) => $(s).addEventListener("input", statusEmbed));
+$("#status-height").addEventListener("input", (e) => (e.target.dataset.touched = "1"));
+async function suggestStatusHeight() {
+  const h = $("#status-height");
+  if (h.dataset.touched) return;
+  try {
+    const groups = new Set((await api("/api/instances")).map((i) => (i.grp || "").trim()).filter(Boolean));
+    h.value = 196 + 64 * Math.max(1, groups.size);
+    statusEmbed();
+  } catch (_) {}
+}
 $("#settings-form").status_page_key.addEventListener("input", statusEmbed);
 $("#status-copy").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($("#status-embed").value); toast("已复制，粘贴到 NY「站点公告」并保存"); }
@@ -725,6 +735,7 @@ async function loadSettings() {
     if (!(s.probes || []).length) box.appendChild(probeRow());
     toggleProbeBlock();
     statusEmbed();
+    suggestStatusHeight();
   } catch (e) { toast(e.message, true); }
 }
 $$("[name=detect_mode]").forEach((r) => r.addEventListener("change", toggleProbeBlock));

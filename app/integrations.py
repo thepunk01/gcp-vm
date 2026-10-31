@@ -55,9 +55,13 @@ def update_cloudflare_a_record(api_token: str, zone_id: str, record_name: str, i
             rec = records[0]
             if rec.get("content") == ip:
                 return f"{record_name} 已指向 {ip}"
+            patch: dict = {"content": ip}
+            if not rec.get("proxied"):
+                # 换 IP 场景需要尽快生效：未开启代理（灰云）的记录统一把 TTL 调到最小 60 秒
+                patch["ttl"] = 60
             resp = requests.patch(
                 f"{CF_API}/zones/{zone_id}/dns_records/{rec['id']}",
-                json={"content": ip},
+                json=patch,
                 headers=headers,
                 timeout=15,
             )

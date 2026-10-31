@@ -135,3 +135,27 @@ def test_create_delete_instance_api(client, fake_gcp):
     assert client.request("DELETE", f"/api/instances/{iid}", json={"confirm_name": "nope"}, headers=h).status_code == 400
     assert client.request("DELETE", f"/api/instances/{iid}", json={"confirm_name": "vm-new"}, headers=h).status_code == 200
     assert len(client.get("/api/instances", headers=h).json()) == 1
+
+
+def test_traffic_api(client, db):
+    h = login(client)
+    client.post("/api/accounts", json={"name": "main", "key": FAKE_KEY}, headers=h)
+    iid = client.get("/api/instances", headers=h).json()[0]["id"]
+    client.patch(f"/api/instances/{iid}", json={"grp": "香港"}, headers=h)
+    r = client.post(f"/api/instances/{iid}/traffic-agent", json={"panel_url": "https://p.example.com"}, headers=h)
+    assert r.status_code == 200 and "gcpvm-traffic" in r.json()["script"]
+    assert client.post(f"/api/instances/{iid}/traffic-agent", json={"panel_url": "bad"}, headers=h).status_code == 400
+    token = db.get_instance(iid)["traffic_token"]
+    assert client.post("/api/traffic-agent/report", json={"rx": 1, "tx": 1}, headers={"Authorization": "Bearer x"}).status_code == 401
+    assert client.post("/api/traffic-agent/report", json={"rx": 1, "tx": 1}, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    assert client.get("/api/traffic", headers=h).json()[str(iid)]["online"] is True
+
+    assert client.get("/api/public/traffic?key=x").status_code == 404  # 未开启
+    assert client.put("/api/settings", json={"status_page_enabled": True, "status_page_key": "short"}, headers=h).status_code == 400
+    key = "k" * 24
+    assert client.put("/api/settings", json={"status_page_enabled": True, "status_page_key": key}, headers=h).status_code == 200
+    assert client.get("/api/public/traffic?key=wrong").status_code == 404
+    data = client.get(f"/api/public/traffic?key={key}").json()
+    assert data["groups"][0]["name"] == "香港" and data["groups"][0]["online"] == 1
+    assert "34.0.0.1" not in str(data) and "vm1" not in str(data)
+    assert client.get("/status").status_code == 200

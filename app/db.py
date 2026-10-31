@@ -82,6 +82,7 @@ INSTANCE_CONFIG_FIELDS = {
     "dns_zone_id": str,
     "dns_record": str,
     "note": str,
+    "grp": str,
 }
 
 
@@ -97,7 +98,15 @@ class Database:
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """为旧数据库补充新增的列。"""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(instances)")}
+        for name, ddl in (("grp", "TEXT DEFAULT ''"), ("traffic_token", "TEXT DEFAULT ''")):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE instances ADD COLUMN {name} {ddl}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -250,7 +259,14 @@ class Database:
             raise ValueError("ip_mode 只能是 ephemeral 或 static")
         if "check_port" in clean and not (1 <= clean["check_port"] <= 65535):
             raise ValueError("端口范围 1-65535")
+        if "grp" in clean:
+            clean["grp"] = clean["grp"].strip()[:40]
         return self.update_instance(instance_id, **clean)
+
+    def find_instance_by_traffic_token(self, token: str) -> dict | None:
+        if not token:
+            return None
+        return self._one("SELECT id, name, grp FROM instances WHERE traffic_token = ?", (token,))
 
     # ---------------- events ----------------
     def add_event(

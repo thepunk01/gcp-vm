@@ -86,6 +86,10 @@ label.check input, label.radio input { width: auto; margin: 0; }
 .badge.bad { color: var(--bad); background: var(--bad-bg); }
 .badge.idle { color: var(--idle); background: var(--idle-bg); }
 .tag { font-size: 11.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; }
+.rate-live { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 2px; }
+.rate-live b { color: var(--text); font-weight: 600; }
+a.btn { text-decoration: none; display: inline-block; }
+#status-panel .inline input { margin: 0; }
 .tag.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
 .table { width: 100%; border-collapse: collapse; }

@@ -74,6 +74,10 @@ DEFAULT_SETTINGS: dict = {
     "telegram_chat_id": "",
     # Cloudflare DNS 自动更新
     "cf_api_token": "",
+    # 公开速率页（可用 iframe 嵌入 NY 面板公告）
+    "status_page_enabled": False,
+    "status_page_key": "",
+    "status_page_title": "实时速率",
     # 「执行命令」里的常用脚本：[{"name": "...", "script": "..."}]
     "script_presets": [
         {

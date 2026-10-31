@@ -82,8 +82,27 @@ const STATUS = {
 };
 const CN = { ok: ["国内可达", "ok"], blocked: ["疑似被墙", "bad"], down: ["服务不可达", "warn"], unknown: ["未检测", "idle"] };
 
+// ---- 实时速率 ----
+let rates = {};
+function fmtBps(bps) {
+  for (const [u, n] of [["Gbps", 1e9], ["Mbps", 1e6], ["Kbps", 1e3]]) if (bps >= n) return (bps / n).toFixed(bps / n >= 100 ? 0 : 1) + " " + u;
+  return Math.round(bps) + " bps";
+}
+function rateText(id) {
+  const r = rates[id];
+  if (!r || !r.last_seen) return "";
+  if (!r.online) return "流量上报离线";
+  return `↓ <b>${fmtBps(r.rx_bps)}</b> · ↑ <b>${fmtBps(r.tx_bps)}</b>`;
+}
+async function loadRates() {
+  try {
+    rates = await api("/api/traffic");
+    $$("[data-rate]").forEach((el) => (el.innerHTML = rateText(el.dataset.rate)));
+  } catch (_) {}
+}
+
 async function loadInstances() {
-  try { instances = await api("/api/instances"); renderInstances(); }
+  try { [instances, rates] = await Promise.all([api("/api/instances"), api("/api/traffic").catch(() => rates)]); renderInstances(); }
   catch (e) { toast(e.message, true); }
 }
 
@@ -112,6 +131,7 @@ function renderInstances() {
       <div>
         <div class="ip" title="点击复制" data-copy="${esc(i.external_ip)}">${esc(i.external_ip) || "<span class='muted'>无外网 IP</span>"}</div>
         <div class="sub">内网 ${esc(i.internal_ip) || "-"}${i.dns_record ? " · " + esc(i.dns_record) : ""}</div>
+        <div class="rate-live" data-rate="${i.id}">${rateText(i.id)}</div>
       </div>
       <div>
         <div class="flags"><span class="badge ${stc}">${st}</span><span class="badge ${cnc}" title="上次检测 ${fmtTime(i.last_check)}">${cn}${i.cn_state === "blocked" ? ` ${i.fail_count}` : ""}</span></div>
@@ -120,6 +140,7 @@ function renderInstances() {
           <span class="tag ${i.auto_start ? "on" : ""}">自动开机 ${i.auto_start ? "开" : "关"}</span>
           <span class="tag">端口 ${i.check_port}</span>
           <span class="tag">${i.ip_mode === "static" ? "静态IP" : "临时IP"}</span>
+          ${i.grp ? `<span class="tag on">${esc(i.grp)}</span>` : ""}
         </div>
       </div>
       <div class="actions">
@@ -196,6 +217,7 @@ function openSettings(inst) {
   f.dns_zone_id.value = inst.dns_zone_id || "";
   f.dns_record.value = inst.dns_record || "";
   f.note.value = inst.note || "";
+  f.grp.value = inst.grp || "";
   $("#inst-dialog").showModal();
 }
 $("#inst-dialog").addEventListener("close", async () => {
@@ -207,7 +229,7 @@ $("#inst-dialog").addEventListener("close", async () => {
       body: {
         auto_ip: f.auto_ip.checked, auto_start: f.auto_start.checked, check_port: +f.check_port.value,
         ip_mode: f.ip_mode.value, dns_zone_id: f.dns_zone_id.value.trim(), dns_record: f.dns_record.value.trim(),
-        note: f.note.value.trim(),
+        note: f.note.value.trim(), grp: f.grp.value.trim(),
       },
     });
     toast("已保存");
@@ -362,6 +384,17 @@ $("#preset-del").addEventListener("click", async () => {
     renderPresets();
   } catch (e) { toast(e.message, true); }
 });
+
+async function fillTraffic(uninstall) {
+  try {
+    const r = await api(`/api/instances/${execInst.id}/traffic-agent`, { method: "POST", body: { panel_url: location.origin, uninstall } });
+    $("#exec-script").value = r.script;
+    $("#exec-preset").value = "";
+    toast(uninstall ? "已填入卸载脚本，点「执行」即可" : `已填入安装脚本（上报到 ${location.origin}），点「执行」即可`);
+  } catch (e) { toast(e.message, true); }
+}
+$("#traffic-install").addEventListener("click", () => fillTraffic(false));
+$("#traffic-uninstall").addEventListener("click", () => fillTraffic(true));
 
 function setExecRunning(on, statusText = "") {
   $("#exec-run").disabled = on;
@@ -647,6 +680,25 @@ function showInstall(row) {
   ].join("\n");
   out.classList.remove("hidden");
 }
+function statusEmbed() {
+  const f = $("#settings-form");
+  const key = f.status_page_key.value.trim();
+  const url = `${location.origin}/status?key=${encodeURIComponent(key)}&theme=${$("#status-theme").value}`;
+  $("#status-open").href = url;
+  $("#status-embed").value = `<iframe src="${url}" width="100%" height="${+$("#status-height").value || 190}" style="border:0;display:block" loading="lazy"></iframe>`;
+}
+$("#status-key-gen").addEventListener("click", () => { $("#settings-form").status_page_key.value = genToken(); statusEmbed(); });
+["#status-theme", "#status-height"].forEach((s) => $(s).addEventListener("input", statusEmbed));
+$("#settings-form").status_page_key.addEventListener("input", statusEmbed);
+$("#status-copy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#status-embed").value); toast("已复制，粘贴到 NY「站点公告」并保存"); }
+  catch (_) { $("#status-embed").select(); toast("请手动复制", true); }
+});
+$("#settings-form").status_page_enabled.addEventListener("change", (e) => {
+  const f = $("#settings-form");
+  if (e.target.checked && !f.status_page_key.value.trim()) { f.status_page_key.value = genToken(); statusEmbed(); }
+});
+
 function toggleProbeBlock() {
   const mode = $("#settings-form").querySelector("[name=detect_mode]:checked")?.value;
   $("#probes-block").classList.toggle("hidden", mode === "local");
@@ -672,6 +724,7 @@ async function loadSettings() {
     (s.probes || []).forEach((p) => box.appendChild(probeRow(p)));
     if (!(s.probes || []).length) box.appendChild(probeRow());
     toggleProbeBlock();
+    statusEmbed();
   } catch (e) { toast(e.message, true); }
 }
 $$("[name=detect_mode]").forEach((r) => r.addEventListener("change", toggleProbeBlock));
@@ -683,6 +736,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
   const body = {
     detect_mode: f.querySelector("[name=detect_mode]:checked")?.value || "agent",
     control_check: f.control_check.checked,
+    status_page_enabled: f.status_page_enabled.checked,
+    status_page_title: f.status_page_title.value.trim(),
+    status_page_key: f.status_page_key.value.trim(),
     probes: $$(".probe-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.url),
     push_probes: $$(".push-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.name || p.token),
   };
@@ -721,6 +777,8 @@ function start() {
   showMain(true);
   switchTab("instances");
   clearInterval(refreshTimer);
+  clearInterval(window.__rateTimer);
+  window.__rateTimer = setInterval(() => { if (!$("#tab-instances").classList.contains("hidden")) loadRates(); }, 5000);
   refreshTimer = setInterval(() => {
     if (!$("#tab-instances").classList.contains("hidden") && !$("#inst-dialog").open && !$("#exec-dialog").open && !$("#create-dialog").open) loadInstances();
   }, 30000);

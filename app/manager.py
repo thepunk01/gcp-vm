@@ -15,6 +15,7 @@ from .firewall import build_body, summarize
 from .provision import IMAGES, build_instance_body, filter_machine_types, sort_zones
 from .integrations import DNSError, send_telegram, update_cloudflare_a_record
 from .jobs import Job, JobStore
+from .traffic import TrafficHub, agent_install_script
 from .remote import (
     MAX_SCRIPT_BYTES,
     RemoteError,
@@ -52,6 +53,7 @@ class Manager:
         self.ssh_key = ssh_key or SSHKey(config.DATA_DIR)
         self.ssh_runner = ssh_runner
         self.jobs = JobStore()
+        self.traffic = TrafficHub()
         self._locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._cycle_lock = threading.Lock()
@@ -612,3 +614,26 @@ class Manager:
             self.db.delete_instance(instance_id)
         finally:
             lock.release()
+
+    # ---------------- traffic ----------------
+    def traffic_agent_script(self, instance_id: int, panel_url: str) -> str:
+        import secrets
+        inst = self._instance(instance_id)
+        token = inst.get("traffic_token") or ""
+        if not token:
+            token = secrets.token_hex(16)
+            self.db.update_instance(instance_id, traffic_token=token)
+        return agent_install_script(panel_url, token)
+
+    def traffic_report(self, token: str, rx, tx) -> bool:
+        inst = self.db.find_instance_by_traffic_token(token)
+        if not inst:
+            return False
+        try:
+            rx_i, tx_i = int(rx), int(tx)
+        except (TypeError, ValueError):
+            raise ManagerError("rx / tx 必须是整数") from None
+        if rx_i < 0 or tx_i < 0:
+            raise ManagerError("rx / tx 不能为负数")
+        self.traffic.report(inst["id"], rx_i, tx_i)
+        return True

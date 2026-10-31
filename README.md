@@ -23,6 +23,7 @@
   - SSH 执行：以 root 执行 bash 脚本并实时显示输出，可停止；内置常用脚本（系统信息、更新系统、开启 BBR、安装 Docker），也可保存自己的
   - 启动脚本：写入实例元数据 `startup-script`，开机时自动执行（可选仅执行一次、写入后立即重启），可查看串口启动日志；SSH 连不上时也能用
 - **防火墙**：查看、新建、启用/禁用、删除项目的 VPC 防火墙规则，一键放行全部端口 / 80、443
+- **实时速率**：实例安装轻量流量上报后，面板显示每台实例的实时上下行速率；可按「分组」生成公开只读速率页，用 iframe 嵌入 NY 等转发面板的公告
 - **事件日志**：所有操作和检测结果可追溯
 
 ## 工作原理
@@ -153,6 +154,17 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 
 删除：实例「设置」→「删除实例」，需要输入实例名称确认。启动盘随实例一起删除；如果使用的是本系统创建的静态 IP（`gcpvm-` 开头）会一并释放，用户自己预留的静态 IP 会保留。
 
+## 实时速率与公开速率页
+
+1. **安装流量上报**：实例「命令」→「填入安装脚本」→「执行」。会在实例上安装 `gcpvm-traffic` systemd 服务（一个 bash 脚本，每 5 秒用 curl 上报默认出口网卡的累计收发字节数，几乎不占资源）。上报地址默认是你当前打开面板用的地址，实例需要能访问到它。卸载：「填入卸载脚本」→「执行」
+2. **设置分组**：实例「设置」→「分组」，例如 `香港入口`。组名建议和转发面板里的设备组一致
+3. **开启公开速率页**：「检测设置」→「公开速率页」，勾选开启（自动生成访问密钥），保存设置，复制嵌入代码
+4. **嵌入 NY 面板**：把嵌入代码（`<iframe …>`）粘到 NY 后台「站点公告」并保存，用户登录后在主页即可看到每个组的实时速率
+
+速率页只显示组名、在线节点数和合计上下行速率，不包含 IP 和实例名；没有设置分组的实例不会出现。速率按实例网卡计算（bit/s），实例超过 20 秒未上报视为离线。
+
+> NY 面板是 HTTPS 时，浏览器会拦截 HTTP 的 iframe，所以本面板也需要 HTTPS 访问（例如用 Caddy 反代：`gcpvm.你的域名 { reverse_proxy 127.0.0.1:8080 }`），并用 HTTPS 地址生成嵌入代码和安装上报脚本。
+
 ## 执行命令
 
 实例卡片上点「命令」打开执行窗口。
@@ -213,6 +225,11 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 | POST | `/api/accounts/{id}/instances` | 新建实例 `{"name", "zone", "machine_type", "image", "disk_size_gb", "disk_type", "network_tier", "spot", "tags", "startup_script", "auto_ip", "auto_start", "check_port", "note"}` |
 | DELETE | `/api/instances/{id}` | 删除实例 `{"confirm_name": "实例名"}` |
 | PATCH / DELETE | `/api/accounts/{id}/firewalls/{name}` | 启用/禁用 `{"disabled": true}` / 删除 |
+| POST | `/api/instances/{id}/traffic-agent` | 生成流量上报安装脚本 `{"panel_url": "https://…"}`（`{"uninstall": true}` 为卸载脚本） |
+| GET | `/api/traffic` | 各实例实时速率 |
+| POST | `/api/traffic-agent/report` | 实例上报流量（实例令牌鉴权） |
+| GET | `/api/public/traffic?key=` | 公开速率数据（按组，需开启并带密钥） |
+| GET | `/status?key=&theme=light\|dark\|auto` | 公开速率页（可 iframe 嵌入） |
 | GET | `/api/push-probes` | 主动上报探针在线状态 |
 | GET | `/api/probe-agent/tasks` | 探针领取任务（探针令牌鉴权） |
 | POST | `/api/probe-agent/report` | 探针上报结果（探针令牌鉴权） |
@@ -253,6 +270,7 @@ app/
   remote.py        SSH 密钥与远程执行、启动脚本封装
   firewall.py      防火墙规则解析与展示
   provision.py     新建实例：镜像、区域、机型筛选与请求体
+  traffic.py       流量上报脚本、实时速率与分组汇总
   jobs.py          命令任务与输出缓存
   integrations.py  Telegram 通知、Cloudflare DNS
   db.py            SQLite 存储

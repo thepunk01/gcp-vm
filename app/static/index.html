@@ -144,6 +144,24 @@
           <label>每天最多自动换 IP 次数<input type="number" name="max_changes_per_day" min="0"></label>
         </div>
 
+        <div class="panel grid2" id="status-panel">
+          <h2 class="span2">公开速率页（可嵌入 NY 面板公告）</h2>
+          <p class="muted small-note span2">按实例「分组」汇总实时上下行速率，不显示 IP 和实例名。实例需先安装流量上报（实例「命令」→「填入安装脚本」→ 执行）。NY 面板是 HTTPS 时，本面板也必须用 HTTPS 访问，否则浏览器会拦截嵌入。</p>
+          <label class="check span2"><input type="checkbox" name="status_page_enabled"> 开启公开速率页</label>
+          <label>标题<input name="status_page_title" maxlength="40"></label>
+          <label>访问密钥（链接里带上才能访问）
+            <span class="inline"><input name="status_page_key" class="mono-input" autocomplete="off" spellcheck="false"><button type="button" class="btn small" id="status-key-gen">重新生成</button></span>
+          </label>
+          <label>主题
+            <select id="status-theme"><option value="light">浅色</option><option value="dark">深色</option><option value="auto">跟随系统</option></select>
+          </label>
+          <label>嵌入高度（px）<input id="status-height" type="number" value="190" min="80" max="2000"></label>
+          <label class="span2">嵌入代码（粘贴到 NY「站点公告」，保存设置后生效）
+            <textarea id="status-embed" rows="3" readonly></textarea>
+          </label>
+          <div class="span2 inline"><button type="button" class="btn small" id="status-copy">复制嵌入代码</button><a id="status-open" class="btn small ghost" target="_blank" rel="noopener">预览速率页</a></div>
+        </div>
+
         <div class="panel grid2">
           <h2 class="span2">通知与 DNS</h2>
           <label>Telegram Bot Token<input name="telegram_bot_token" autocomplete="off"></label>
@@ -192,6 +210,7 @@
     </label>
     <label>Cloudflare Zone ID<input name="dns_zone_id" placeholder="可选"></label>
     <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选，如 node1.example.com"></label>
+    <label>分组（用于公开速率页，如 香港入口；留空则不在速率页显示）<input name="grp" maxlength="40"></label>
     <label>备注<input name="note"></label>
     <div class="form-actions">
       <button class="btn danger ghost" type="button" id="inst-delete">删除实例</button>
@@ -267,6 +286,11 @@
       <select id="exec-preset"><option value="">— 常用脚本 —</option></select>
       <button type="button" class="btn small" id="preset-save">存为常用</button>
       <button type="button" class="btn small danger" id="preset-del">删除</button>
+    </div>
+    <div class="inline preset-row">
+      <span class="muted small-note" style="margin:0">流量上报（实时速率）：</span>
+      <button type="button" class="btn small" id="traffic-install">填入安装脚本</button>
+      <button type="button" class="btn small" id="traffic-uninstall">填入卸载脚本</button>
     </div>
     <textarea id="exec-script" rows="8" spellcheck="false" placeholder="例如：&#10;apt-get update&#10;apt-get install -y curl"></textarea>
     <div class="inline exec-actions">

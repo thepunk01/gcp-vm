@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>实时速率</title>
+<style>
+:root {
+  --bg: transparent; --card: #ffffff; --line: #e5e7eb; --text: #111827; --muted: #6b7280;
+  --rx: #0d9488; --tx: #2563eb; --ok: #15803d; --ok-bg: #dcfce7; --off: #6b7280; --off-bg: #f3f4f6;
+}
+:root[data-theme="dark"] {
+  --card: #1f2329; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+  --rx: #2dd4bf; --tx: #60a5fa; --ok: #4ade80; --ok-bg: #12301f; --off: #8b949e; --off-bg: #262c36;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --card: #1f2329; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --rx: #2dd4bf; --tx: #60a5fa; --ok: #4ade80; --ok-bg: #12301f; --off: #8b949e; --off-bg: #262c36;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.wrap { padding: 4px 2px; }
+.head { display: flex; align-items: center; gap: 10px; margin: 0 2px 10px; flex-wrap: wrap; }
+.head h1 { font-size: 15px; margin: 0; font-weight: 650; }
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); animation: pulse 2s infinite; }
+.live.stale i { background: var(--off); animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 10px; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+.name { font-weight: 650; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; white-space: nowrap; color: var(--ok); background: var(--ok-bg); }
+.pill.off { color: var(--off); background: var(--off-bg); }
+.rates { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.rate .lbl { font-size: 11.5px; color: var(--muted); }
+.rate .val { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.rate .val small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+.rx .lbl::before, .tx .lbl::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
+.rx .lbl::before { background: var(--rx); }
+.tx .lbl::before { background: var(--tx); }
+svg.spark { display: block; width: 100%; height: 34px; margin-top: 6px; }
+.msg { color: var(--muted); padding: 18px 4px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1 id="title">实时速率</h1>
+    <span class="live" id="live"><i></i><span id="updated">连接中…</span></span>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="msg" id="msg" hidden></div>
+</div>
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+const theme = ["light", "dark", "auto"].includes(params.get("theme")) ? params.get("theme") : "auto";
+document.documentElement.dataset.theme = theme;
+if (params.get("bg")) {
+  const bg = params.get("bg");
+  if (/^(transparent|#[0-9a-fA-F]{3,8})$/.test(bg)) document.documentElement.style.setProperty("--bg", bg);
+}
+const HISTORY = 36;
+const history = {};
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function fmt(bps) {
+  const units = [["Gbps", 1e9], ["Mbps", 1e6], ["Kbps", 1e3]];
+  for (const [u, n] of units) if (bps >= n) return [(bps / n).toFixed(bps / n >= 100 ? 0 : bps / n >= 10 ? 1 : 2), u];
+  return [String(Math.round(bps)), "bps"];
+}
+function spark(points, max) {
+  const w = 200, h = 34, step = w / (HISTORY - 1);
+  const base = `<line x1="0" y1="${h - 1}" x2="${w}" y2="${h - 1}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+  if (points.length < 2) return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${base}</svg>`;
+  const off = HISTORY - points.length;
+  const path = (key) => points.map((p, i) => `${((off + i) * step).toFixed(1)},${(h - 2 - (p[key] / max) * (h - 4)).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${base}
+    <polyline points="${path("rx")}" fill="none" stroke="var(--rx)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>
+    <polyline points="${path("tx")}" fill="none" stroke="var(--tx)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
+function render(data) {
+  document.getElementById("title").textContent = data.title || "实时速率";
+  document.title = data.title || "实时速率";
+  const grid = document.getElementById("grid");
+  const msg = document.getElementById("msg");
+  if (!data.groups.length) {
+    grid.innerHTML = "";
+    msg.textContent = "暂无数据";
+    msg.hidden = false;
+    return;
+  }
+  msg.hidden = true;
+  grid.innerHTML = data.groups.map((g) => {
+    const h = (history[g.name] = (history[g.name] || []).concat([{ rx: g.rx_bps, tx: g.tx_bps }]).slice(-HISTORY));
+    const max = Math.max(1, ...h.map((p) => Math.max(p.rx, p.tx)));
+    const [rv, ru] = fmt(g.rx_bps);
+    const [tv, tu] = fmt(g.tx_bps);
+    const online = g.online > 0;
+    return `<div class="card">
+      <div class="top"><span class="name" title="${esc(g.name)}">${esc(g.name)}</span>
+        <span class="pill ${online ? "" : "off"}">${online ? `${g.online}/${g.total} 在线` : "离线"}</span></div>
+      <div class="rates">
+        <div class="rate rx"><div class="lbl">下行</div><div class="val">${rv}<small>${ru}</small></div></div>
+        <div class="rate tx"><div class="lbl">上行</div><div class="val">${tv}<small>${tu}</small></div></div>
+      </div>
+      ${spark(h, max)}
+    </div>`;
+  }).join("");
+}
+let fails = 0;
+async function tick() {
+  try {
+    const key = params.get("key") || "";
+    const res = await fetch(`/api/public/traffic?key=${encodeURIComponent(key)}`, { cache: "no-store" });
+    if (res.status === 404) {
+      document.getElementById("grid").innerHTML = "";
+      const msg = document.getElementById("msg");
+      msg.textContent = "速率页未开启或链接无效";
+      msg.hidden = false;
+      document.getElementById("updated").textContent = "";
+      return setTimeout(tick, 30000);
+    }
+    const data = await res.json();
+    render(data);
+    fails = 0;
+    document.getElementById("live").classList.remove("stale");
+    document.getElementById("updated").textContent = "实时 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  } catch (_) {
+    fails += 1;
+    if (fails >= 2) {
+      document.getElementById("live").classList.add("stale");
+      document.getElementById("updated").textContent = "连接中断，重试中…";
+    }
+  }
+  setTimeout(tick, 5000);
+}
+tick();
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import re
 import json
 import logging
 import time
@@ -320,6 +321,49 @@ def create_app(
         pub = await asyncio.to_thread(manager.ssh_key.ensure)
         return JSONResponse({"user": manager.ssh_key.user, "public_key": pub})
 
+    # ---- traffic ----
+    async def traffic_report(request: Request):
+        header = request.headers.get("authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        data = await body(request)
+        try:
+            ok = await asyncio.to_thread(manager.traffic_report, token, data.get("rx"), data.get("tx"))
+        except ManagerError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not ok:
+            raise HTTPException(401, "上报令牌无效")
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def traffic_rates(_: Request):
+        rates = manager.traffic.all_rates(db.list_instances())
+        return JSONResponse({str(k): v for k, v in rates.items()})
+
+    @protected
+    async def traffic_agent(request: Request):
+        iid = int_param(request)
+        data = await body(request)
+        if data.get("uninstall"):
+            from .traffic import UNINSTALL
+            return JSONResponse({"script": UNINSTALL})
+        script = await asyncio.to_thread(manager.traffic_agent_script, iid, str(data.get("panel_url", "")))
+        return JSONResponse({"script": script})
+
+    async def public_traffic(request: Request):
+        s = db.get_settings()
+        key = request.query_params.get("key", "")
+        expected = s.get("status_page_key") or ""
+        if not s.get("status_page_enabled") or not expected or not hmac.compare_digest(key.encode(), expected.encode()):
+            raise HTTPException(404, "not found")
+        groups = manager.traffic.groups(db.list_instances())
+        return JSONResponse(
+            {"title": s.get("status_page_title") or "实时速率", "groups": groups, "ts": time.time()},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def status_page(_: Request):
+        return FileResponse(STATIC_DIR / "status.html", headers={"Cache-Control": "no-cache"})
+
     # ---- push probes (探针令牌鉴权，不走管理员登录) ----
     def probe_name(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -372,6 +416,15 @@ def create_app(
                 data[k] = float(data[k])
         if "detect_mode" in data and data["detect_mode"] not in ("agent", "local"):
             raise ValueError("detect_mode 只能是 agent 或 local")
+        if "status_page_title" in data:
+            data["status_page_title"] = str(data["status_page_title"]).strip()[:40] or "实时速率"
+        if "status_page_key" in data:
+            data["status_page_key"] = str(data["status_page_key"]).strip()
+        if "status_page_enabled" in data:
+            data["status_page_enabled"] = bool(data["status_page_enabled"])
+            key = data.get("status_page_key", db.get_settings().get("status_page_key", ""))
+            if data["status_page_enabled"] and not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", key or ""):
+                raise ValueError("公开速率页的访问密钥需为 16-64 位字母、数字、-、_")
         if "script_presets" in data:
             if not isinstance(data["script_presets"], list):
                 raise ValueError("script_presets 必须是列表")
@@ -452,6 +505,11 @@ def create_app(
     routes = [
         Route("/", index),
         Route("/api/health", health),
+        Route("/status", status_page),
+        Route("/api/public/traffic", public_traffic),
+        Route("/api/traffic-agent/report", traffic_report, methods=["POST"]),
+        Route("/api/traffic", traffic_rates),
+        Route("/api/instances/{id}/traffic-agent", traffic_agent, methods=["POST"]),
         Route("/probe/{name}", probe_file),
         Route("/api/login", login, methods=["POST"]),
         Route("/api/accounts", list_accounts),

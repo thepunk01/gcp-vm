@@ -40,7 +40,8 @@
         <div class="stats" id="stats"></div>
         <div class="toolbar-actions">
           <button class="btn" id="btn-run-check">立即检测一轮</button>
-          <button class="btn primary" id="btn-sync">从 GCP 同步</button>
+          <button class="btn" id="btn-sync">从 GCP 同步</button>
+          <button class="btn primary" id="btn-create">+ 新建实例</button>
         </div>
       </div>
       <div id="instances" class="cards"></div>
@@ -72,7 +73,7 @@
           <button type="button" class="btn small" data-quick="web">放行 80 / 443</button>
           <button type="button" class="btn small" data-quick="proxy">放行 TCP+UDP 全端口</button>
         </div>
-        <label>名称<input name="name" placeholder="如 allow-proxy" required pattern="[a-z]([-a-z0-9]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头"></label>
+        <label>名称<input name="name" placeholder="如 allow-proxy" required pattern="[a-z]([a-z0-9\-]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头"></label>
         <label>网络<select name="network"></select></label>
         <label>方向
           <select name="direction"><option value="INGRESS">入站（外部访问实例）</option><option value="EGRESS">出站（实例访问外部）</option></select>
@@ -193,8 +194,58 @@
     <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选，如 node1.example.com"></label>
     <label>备注<input name="note"></label>
     <div class="form-actions">
+      <button class="btn danger ghost" type="button" id="inst-delete">删除实例</button>
+      <span class="spacer"></span>
       <button class="btn ghost" value="cancel" formnovalidate>取消</button>
       <button class="btn primary" value="save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 新建实例弹窗 -->
+<dialog id="create-dialog" class="wide">
+  <form id="create-form">
+    <div class="dialog-head">
+      <h2>新建实例</h2>
+      <button class="btn small ghost" type="button" id="create-close">关闭</button>
+    </div>
+    <div class="grid2">
+      <label>账号 / 项目<select name="account"></select></label>
+      <label>实例名称<input name="name" required pattern="[a-z]([a-z0-9\-]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头"></label>
+      <label>区域 / 可用区<select name="zone" required></select></label>
+      <label>机型<select name="machine_type" required><option value="">先选择可用区</option></select></label>
+      <label>系统<select name="image"></select></label>
+      <label>磁盘大小（GB）<input name="disk_size_gb" type="number" min="10" max="2000" value="20"></label>
+      <label>磁盘类型
+        <select name="disk_type">
+          <option value="pd-balanced">平衡型 pd-balanced（推荐）</option>
+          <option value="pd-standard">标准型 pd-standard（最便宜，较慢）</option>
+          <option value="pd-ssd">SSD pd-ssd（最快，较贵）</option>
+        </select>
+      </label>
+      <label>网络层级
+        <select name="network_tier">
+          <option value="PREMIUM">高级（推荐，国内连接通常更好）</option>
+          <option value="STANDARD">标准（流量更便宜，部分区域不支持）</option>
+        </select>
+      </label>
+      <label class="check span2"><input type="checkbox" name="spot"> Spot 抢占式实例（便宜约 60-90%，但随时可能被 GCP 回收关机，建议同时开启自动开机）</label>
+      <h3 class="span2 sub-title">面板设置</h3>
+      <label class="check"><input type="checkbox" name="auto_ip" checked> 被墙自动更换 IP</label>
+      <label class="check"><input type="checkbox" name="auto_start"> 关机/被回收时自动开机</label>
+      <label>检测端口<input name="check_port" type="number" min="1" max="65535" value="22"></label>
+      <label>网络标记（可选，用于防火墙规则）<input name="tags" placeholder="如 proxy-server"></label>
+      <label class="span2">备注（可选）<input name="note"></label>
+      <label class="span2">开机后执行的脚本（可选，仅执行一次，可在「命令 → 启动脚本」查看日志）
+        <select id="create-preset"><option value="">— 从常用脚本填入 —</option></select>
+        <textarea name="startup_script" rows="5" spellcheck="false" placeholder="例如：&#10;apt-get update && apt-get install -y curl"></textarea>
+      </label>
+    </div>
+    <p class="muted small-note">面板 SSH 公钥会在创建时自动写入，创建后可直接用「命令」执行脚本。新实例使用临时外网 IP，不附加服务账号（权限最小）。</p>
+    <div class="form-actions">
+      <span id="create-hint" class="muted"></span>
+      <span class="spacer"></span>
+      <button class="btn primary" type="submit">创建实例</button>
     </div>
   </form>
 </dialog>

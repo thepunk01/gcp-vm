@@ -105,6 +105,38 @@ class FakeGCP:
     def get_serial_output(self, zone, name, start=None):
         return {"contents": self.serial, "start": 0, "next": len(self.serial)}
 
+    def list_zones(self):
+        return [
+            {"name": "us-central1-a", "region": "us-central1", "status": "UP"},
+            {"name": "asia-east1-b", "region": "asia-east1", "status": "UP"},
+            {"name": "asia-east1-c", "region": "asia-east1", "status": "DOWN"},
+            {"name": "asia-east2-a", "region": "asia-east2", "status": "UP"},
+        ]
+
+    def list_machine_types(self, zone):
+        return [
+            {"name": "e2-small", "cpus": 2, "memory_mb": 2048, "shared": True, "deprecated": False},
+            {"name": "e2-micro", "cpus": 2, "memory_mb": 1024, "shared": True, "deprecated": False},
+            {"name": "e2-standard-64", "cpus": 64, "memory_mb": 262144, "shared": False, "deprecated": False},
+            {"name": "m1-ultramem-40", "cpus": 40, "memory_mb": 983040, "shared": False, "deprecated": False},
+            {"name": "n1-standard-1", "cpus": 1, "memory_mb": 3840, "shared": False, "deprecated": False},
+            {"name": "f1-micro", "cpus": 1, "memory_mb": 614, "shared": True, "deprecated": True},
+        ]
+
+    def insert_instance(self, zone, body):
+        from app.gcp import GCPError
+        if (zone, body["name"]) in self.instances:
+            raise GCPError("POST instances 失败：HTTP 409 The resource 'x' already exists")
+        self.calls.append(("insert", body["name"]))
+        self.inserted = body
+        tier = body["networkInterfaces"][0]["accessConfigs"][0]["networkTier"]
+        self.instances[(zone, body["name"])] = {"status": "RUNNING", "ip": next(self.ip_seq), "ac": "External NAT", "tier": tier}
+        self.metadata[(zone, body["name"])] = {i["key"]: i["value"] for i in body["metadata"]["items"]}
+
+    def delete_instance(self, zone, name):
+        self.calls.append(("delete", name))
+        del self.instances[(zone, name)]
+
     def list_firewalls(self):
         return list(self.firewalls.values())
 

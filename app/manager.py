@@ -12,6 +12,7 @@ from .checker import STATE_BLOCKED, STATE_DOWN, STATE_OK, STATE_UNKNOWN, BlockCh
 from .db import Database
 from .gcp import ClientPool, GCPClient, GCPError, region_of
 from .firewall import build_body, summarize
+from .provision import IMAGES, build_instance_body, filter_machine_types, sort_zones
 from .integrations import DNSError, send_telegram, update_cloudflare_a_record
 from .jobs import Job, JobStore
 from .remote import (
@@ -505,3 +506,109 @@ class Manager:
         except GCPError as e:
             raise ManagerError(str(e)) from e
         self._event(None, "firewall", f"[{acc['name']}] 删除防火墙规则 {name}", "warn")
+
+    # ---------------- create / delete instance ----------------
+    def create_options(self, account_id: int) -> dict:
+        _, client = self._account_client(account_id)
+        try:
+            zones = sort_zones(client.list_zones())
+            networks = client.list_networks()
+        except GCPError as e:
+            raise ManagerError(str(e)) from e
+        return {
+            "zones": zones,
+            "networks": networks,
+            "images": [{"id": i["id"], "label": i["label"]} for i in IMAGES],
+        }
+
+    def machine_types(self, account_id: int, zone: str) -> list[dict]:
+        _, client = self._account_client(account_id)
+        try:
+            return filter_machine_types(client.list_machine_types(zone))
+        except GCPError as e:
+            raise ManagerError(str(e)) from e
+
+    @staticmethod
+    def _explain_create(e: GCPError) -> str:
+        msg = str(e)
+        if "alreadyExists" in msg or "already exists" in msg:
+            return "实例名称已存在，请换一个名称"
+        if "ZONE_RESOURCE_POOL_EXHAUSTED" in msg or "does not have enough resources" in msg:
+            return "该可用区暂时没有足够资源，请换一个可用区或机型后重试"
+        if "QUOTA" in msg.upper() or "Quota" in msg:
+            return (
+                "超出 GCP 配额（例如该区域或全部区域的 vCPU 数、外网 IP 数）。"
+                "可关停/删除不用的实例，或在 GCP 控制台「IAM 和管理 → 配额」申请提高。原始错误：" + msg
+            )
+        return msg
+
+    def create_instance(self, account_id: int, data: dict) -> dict:
+        acc, client = self._account_client(account_id)
+        script = str(data.get("startup_script") or "").replace("\r\n", "\n")
+        startup = ""
+        if script.strip():
+            startup = wrap_startup_script(self._check_script(script), bool(data.get("run_once", True)))
+        zone, body = build_instance_body(data, self.ssh_key.metadata_line(), startup)
+        cfg = {
+            "auto_ip": bool(data.get("auto_ip", True)),
+            "auto_start": bool(data.get("auto_start", bool(data.get("spot")))),
+            "check_port": int(data.get("check_port") or 22),
+            "note": str(data.get("note") or "")[:200],
+        }
+        if not 1 <= cfg["check_port"] <= 65535:
+            raise ManagerError("检测端口范围 1-65535")
+        try:
+            client.insert_instance(zone, body)
+        except GCPError as e:
+            self._event(None, "create", f"[{acc['name']}] 创建实例 {body['name']} 失败：{self._explain_create(e)}", "error")
+            raise ManagerError(self._explain_create(e)) from e
+        self.sync_account(account_id)
+        inst = next(
+            (i for i in self.db.list_instances()
+             if i["account_id"] == account_id and i["zone"] == zone and i["name"] == body["name"]),
+            None,
+        )
+        if not inst:
+            raise ManagerError("实例已创建，但同步时未找到，请稍后点「从 GCP 同步」")
+        inst = self.db.update_instance_config(inst["id"], cfg)
+        mt = body["machineType"].rsplit("/", 1)[-1]
+        self._event(
+            inst, "create",
+            f"新建实例：{zone} · {mt}{' · Spot' if data.get('spot') else ''}，IP {inst['external_ip'] or '-'}",
+            notify=True,
+        )
+        return inst
+
+    def delete_instance(self, instance_id: int) -> None:
+        inst = self._instance(instance_id)
+        lock = self._lock_for(instance_id)
+        if not lock.acquire(timeout=1):
+            raise ManagerError("该实例正在执行其他操作，请稍后")
+        try:
+            client = self._client(inst["account_id"])
+            region = region_of(inst["zone"])
+            addr = None
+            try:
+                ip = client.get_instance(inst["zone"], inst["name"])["external_ip"]
+                addr = client.find_address_by_ip(region, ip) if ip else None
+            except GCPError:
+                pass
+            try:
+                client.delete_instance(inst["zone"], inst["name"])
+            except GCPError as e:
+                if "HTTP 404" not in str(e):
+                    self._event(inst, "delete", f"删除实例失败：{e}", "error")
+                    raise ManagerError(str(e)) from e
+            msg = f"已删除实例（{inst['zone']}，IP {inst['external_ip'] or '-'}）"
+            if addr and addr.get("name", "").startswith(STATIC_PREFIX):
+                try:
+                    client.release_address(region, addr["name"])
+                    msg += f"，并释放静态 IP {addr.get('address')}"
+                except GCPError as e:
+                    msg += f"；释放静态 IP 失败：{e}，请到 GCP 控制台手动释放以免计费"
+            elif addr:
+                msg += f"；静态 IP {addr.get('address')} 非本系统创建，已保留（未绑定的静态 IP 会计费）"
+            self._event(inst, "delete", msg, "warn", notify=True)
+            self.db.delete_instance(instance_id)
+        finally:
+            lock.release()

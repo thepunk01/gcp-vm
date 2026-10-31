@@ -182,6 +182,36 @@ def create_app(
         await asyncio.to_thread(manager.delete_firewall, int_param(request), request.path_params["name"])
         return JSONResponse({"ok": True})
 
+    # ---- create / delete instance ----
+    @protected
+    async def create_options(request: Request):
+        return JSONResponse(await asyncio.to_thread(manager.create_options, int_param(request)))
+
+    @protected
+    async def machine_types(request: Request):
+        zone = request.query_params.get("zone", "")
+        if not zone:
+            raise ValueError("缺少 zone 参数")
+        return JSONResponse(await asyncio.to_thread(manager.machine_types, int_param(request), zone))
+
+    @protected
+    async def create_instance(request: Request):
+        aid = int_param(request)
+        data = await body(request)
+        inst = await asyncio.to_thread(manager.create_instance, aid, data)
+        return JSONResponse({"instance": _clean(inst)})
+
+    @protected
+    async def delete_instance(request: Request):
+        iid = int_param(request)
+        inst = db.get_instance(iid)
+        if not inst:
+            raise HTTPException(404, "实例不存在")
+        if (await body(request)).get("confirm_name") != inst["name"]:
+            raise ValueError("实例名称不匹配，未删除")
+        await asyncio.to_thread(manager.delete_instance, iid)
+        return JSONResponse({"ok": True})
+
     # ---- instances ----
     @protected
     async def list_instances(_: Request):
@@ -427,6 +457,9 @@ def create_app(
         Route("/api/accounts", list_accounts),
         Route("/api/accounts", add_account, methods=["POST"]),
         Route("/api/accounts/{id}", delete_account, methods=["DELETE"]),
+        Route("/api/accounts/{id}/create-options", create_options),
+        Route("/api/accounts/{id}/machine-types", machine_types),
+        Route("/api/accounts/{id}/instances", create_instance, methods=["POST"]),
         Route("/api/accounts/{id}/firewalls", list_firewalls),
         Route("/api/accounts/{id}/firewalls", create_firewall, methods=["POST"]),
         Route("/api/accounts/{id}/firewalls/{name}", update_firewall, methods=["PATCH"]),
@@ -434,6 +467,7 @@ def create_app(
         Route("/api/instances", list_instances),
         Route("/api/sync", sync, methods=["POST"]),
         Route("/api/instances/{id}", update_instance, methods=["PATCH"]),
+        Route("/api/instances/{id}", delete_instance, methods=["DELETE"]),
         Route("/api/instances/{id}/action", instance_action, methods=["POST"]),
         Route("/api/instances/{id}/exec", exec_command, methods=["POST"]),
         Route("/api/instances/{id}/startup-script", get_startup),

@@ -274,6 +274,44 @@ class GCPClient:
         )
         self._wait(op)
 
+    # ---------------- create / delete ----------------
+    def list_zones(self) -> list[dict]:
+        data = self._request("GET", f"projects/{self.project}/zones", params={"maxResults": 500})
+        return [
+            {"name": z["name"], "region": _last(z.get("region", "")), "status": z.get("status", "")}
+            for z in data.get("items") or []
+        ]
+
+    def list_machine_types(self, zone: str) -> list[dict]:
+        result: list[dict] = []
+        params: dict[str, Any] = {"maxResults": 500}
+        while True:
+            data = self._request(
+                "GET", f"projects/{self.project}/zones/{zone}/machineTypes", params=params
+            )
+            for m in data.get("items") or []:
+                result.append({
+                    "name": m["name"],
+                    "cpus": int(m.get("guestCpus", 0)),
+                    "memory_mb": int(m.get("memoryMb", 0)),
+                    "shared": bool(m.get("isSharedCpu")),
+                    "deprecated": bool(m.get("deprecated")),
+                })
+            token = data.get("nextPageToken")
+            if not token:
+                return result
+            params["pageToken"] = token
+
+    def insert_instance(self, zone: str, body: dict) -> None:
+        op = self._request("POST", f"projects/{self.project}/zones/{zone}/instances", body=body)
+        self._wait(op, timeout=600)
+
+    def delete_instance(self, zone: str, name: str) -> None:
+        op = self._request(
+            "DELETE", f"projects/{self.project}/zones/{zone}/instances/{quote(name)}"
+        )
+        self._wait(op, timeout=600)
+
     # ---------------- firewall ----------------
     def list_firewalls(self) -> list[dict]:
         result: list[dict] = []

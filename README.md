@@ -5,6 +5,7 @@
 ## 功能
 
 - **多账号**：上传多个 GCP 服务账号密钥，自动发现各项目下所有区域的实例
+- **新建 / 删除实例**：在面板里选区域、机型、系统、磁盘、Spot 直接开新实例，自动写入面板 SSH 公钥、开启被墙自动换 IP，可附带开机脚本；删除时一并释放本系统创建的静态 IP
 - **手动操作**：开机、关机、重启、一键更换外网 IP、单次被墙检测
 - **被墙自动检测**：通过部署在国内的探针（或本机在国内时直接检测）定时 TCP 探测实例端口
   - 国内不通 + 海外通 → 判定为被墙；连续 N 次（默认 3）后自动更换 IP
@@ -140,6 +141,18 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
    - **检测端口** 填实例上实际开放的 TCP 端口（如代理服务端口或 SSH 22），并确认 GCP 防火墙已放行
    - 可选：填 Cloudflare Zone ID 与域名，换 IP 后自动更新 A 记录（需在检测设置中填 Cloudflare API Token）
 
+## 新建与删除实例
+
+「实例」页点「+ 新建实例」：
+
+- 区域列表把常用的亚洲区域（台湾、香港、东京、新加坡等）排在前面；机型只列常用的 x86 系列（E2、N2D、N2、T2D、N1、C2D、C3D、C3，32 vCPU 以内）
+- 系统可选 Debian 12/13、Ubuntu 24.04/22.04、Rocky Linux 9、AlmaLinux 9
+- 新实例使用临时外网 IP（可选高级 / 标准网络层级），不附加服务账号；创建时写入面板 SSH 公钥并设置 `enable-oslogin=FALSE`，建好即可用「命令」执行脚本
+- 可勾选 Spot（便宜但可能被回收，会自动勾上「自动开机」），可填写开机后执行一次的脚本，可从常用脚本中选择
+- 创建通常需要 30-60 秒；配额不足、可用区资源不足时会给出中文提示
+
+删除：实例「设置」→「删除实例」，需要输入实例名称确认。启动盘随实例一起删除；如果使用的是本系统创建的静态 IP（`gcpvm-` 开头）会一并释放，用户自己预留的静态 IP 会保留。
+
 ## 执行命令
 
 实例卡片上点「命令」打开执行窗口。
@@ -195,6 +208,10 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 | GET | `/api/instances/{id}/serial-log?all=1` | 串口启动日志 |
 | GET | `/api/ssh-key` | 面板 SSH 公钥 |
 | GET / POST | `/api/accounts/{id}/firewalls` | 列出防火墙规则与网络 / 新建 `{"name", "rules": "all 或 tcp:443 udp:443", "ranges", "direction", "action", "priority", "target_tags", "network"}` |
+| GET | `/api/accounts/{id}/create-options` | 新建实例可选的可用区、网络、系统镜像 |
+| GET | `/api/accounts/{id}/machine-types?zone=` | 可用区内的机型 |
+| POST | `/api/accounts/{id}/instances` | 新建实例 `{"name", "zone", "machine_type", "image", "disk_size_gb", "disk_type", "network_tier", "spot", "tags", "startup_script", "auto_ip", "auto_start", "check_port", "note"}` |
+| DELETE | `/api/instances/{id}` | 删除实例 `{"confirm_name": "实例名"}` |
 | PATCH / DELETE | `/api/accounts/{id}/firewalls/{name}` | 启用/禁用 `{"disabled": true}` / 删除 |
 | GET | `/api/push-probes` | 主动上报探针在线状态 |
 | GET | `/api/probe-agent/tasks` | 探针领取任务（探针令牌鉴权） |
@@ -235,6 +252,7 @@ app/
   manager.py       业务逻辑：同步、开关机、换 IP、自动检测循环、执行命令
   remote.py        SSH 密钥与远程执行、启动脚本封装
   firewall.py      防火墙规则解析与展示
+  provision.py     新建实例：镜像、区域、机型筛选与请求体
   jobs.py          命令任务与输出缓存
   integrations.py  Telegram 通知、Cloudflare DNS
   db.py            SQLite 存储

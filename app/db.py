@@ -236,6 +236,10 @@ class Database:
                 )
         return self.get_instance(instance_id)
 
+    def delete_instance(self, instance_id: int) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+
     def update_instance_config(self, instance_id: int, values: dict) -> dict | None:
         clean: dict[str, Any] = {}
         for k, cast in INSTANCE_CONFIG_FIELDS.items():

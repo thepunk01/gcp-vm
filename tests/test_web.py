@@ -122,3 +122,16 @@ def test_firewall_api(client):
     assert client.patch(f"/api/accounts/{aid}/firewalls/allow-all", json={"disabled": True}, headers=h).status_code == 200
     assert client.delete(f"/api/accounts/{aid}/firewalls/allow-all", headers=h).status_code == 200
     assert len(client.get(f"/api/accounts/{aid}/firewalls", headers=h).json()["rules"]) == 1
+
+
+def test_create_delete_instance_api(client, fake_gcp):
+    h = login(client)
+    aid = client.post("/api/accounts", json={"name": "main", "key": FAKE_KEY}, headers=h).json()["id"]
+    assert client.get(f"/api/accounts/{aid}/create-options", headers=h).json()["zones"][0]["name"] == "asia-east1-b"
+    assert client.get(f"/api/accounts/{aid}/machine-types?zone=asia-east1-b", headers=h).status_code == 200
+    r = client.post(f"/api/accounts/{aid}/instances", json={"name": "vm-new", "zone": "asia-east1-b", "machine_type": "e2-small"}, headers=h)
+    assert r.status_code == 200, r.text
+    iid = r.json()["instance"]["id"]
+    assert client.request("DELETE", f"/api/instances/{iid}", json={"confirm_name": "nope"}, headers=h).status_code == 400
+    assert client.request("DELETE", f"/api/instances/{iid}", json={"confirm_name": "vm-new"}, headers=h).status_code == 200
+    assert len(client.get("/api/instances", headers=h).json()) == 1

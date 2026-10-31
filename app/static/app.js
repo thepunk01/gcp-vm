@@ -215,6 +215,106 @@ $("#inst-dialog").addEventListener("close", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
+// ---- 删除实例 ----
+$("#inst-delete").addEventListener("click", async (e) => {
+  if (!editing) return;
+  const name = prompt(`删除后实例和启动盘中的数据将无法恢复！\n确认删除请输入实例名称：${editing.name}`);
+  if (name === null) return;
+  if (name.trim() !== editing.name) return toast("名称不匹配，未删除", true);
+  await busy(e.currentTarget, async () => {
+    await api(`/api/instances/${editing.id}`, { method: "DELETE", body: { confirm_name: name.trim() } });
+    toast(`实例 ${editing.name} 已删除`);
+    $("#inst-dialog").close();
+    loadInstances();
+  });
+});
+
+// ---- 新建实例 ----
+let createOpts = null;
+const pad = (n) => String(n).padStart(2, "0");
+function defaultName() {
+  const d = new Date();
+  return `vm-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+async function loadCreateOptions() {
+  const f = $("#create-form");
+  const aid = f.account.value;
+  f.zone.innerHTML = `<option value="">加载中…</option>`;
+  createOpts = await api(`/api/accounts/${aid}/create-options`);
+  const groups = {};
+  createOpts.zones.forEach((z) => (groups[z.region] = groups[z.region] || []).push(z));
+  f.zone.innerHTML = Object.entries(groups).map(([r, zs]) => {
+    const label = zs[0].label.includes(" · ") ? `${zs[0].label.split(" · ")[0]}（${r}）` : r;
+    return `<optgroup label="${esc(label)}">${zs.map((z) => `<option value="${esc(z.name)}">${esc(z.name)}</option>`).join("")}</optgroup>`;
+  }).join("");
+  const pref = createOpts.zones.find((z) => z.name === "asia-east1-b") || createOpts.zones[0];
+  if (pref) f.zone.value = pref.name;
+  f.image.innerHTML = createOpts.images.map((i) => `<option value="${esc(i.id)}">${esc(i.label)}</option>`).join("");
+  await loadMachineTypes();
+}
+async function loadMachineTypes() {
+  const f = $("#create-form");
+  const prev = f.machine_type.value;
+  f.machine_type.innerHTML = `<option value="">加载中…</option>`;
+  try {
+    const types = await api(`/api/accounts/${f.account.value}/machine-types?zone=${encodeURIComponent(f.zone.value)}`);
+    const fams = {};
+    types.forEach((m) => (fams[m.name.split("-")[0]] = fams[m.name.split("-")[0]] || []).push(m));
+    f.machine_type.innerHTML = Object.entries(fams).map(([fam, ms]) =>
+      `<optgroup label="${esc(fam.toUpperCase())}">${ms.map((m) => `<option value="${esc(m.name)}">${esc(m.label)}</option>`).join("")}</optgroup>`).join("");
+    const want = types.find((m) => m.name === prev) || types.find((m) => m.name === "e2-small") || types[0];
+    if (want) f.machine_type.value = want.name;
+  } catch (e) {
+    f.machine_type.innerHTML = `<option value="">加载失败</option>`;
+    toast(e.message, true);
+  }
+}
+$("#btn-create").addEventListener("click", async (e) => {
+  const f = $("#create-form");
+  await busy(e.currentTarget, async () => {
+    const accounts = await api("/api/accounts");
+    if (!accounts.length) throw new Error("请先到「账号」页添加 GCP 服务账号");
+    f.account.innerHTML = accounts.map((a) => `<option value="${a.id}">${esc(a.name)}（${esc(a.project_id)}）</option>`).join("");
+    f.name.value = defaultName();
+    $("#create-hint").textContent = "";
+    try {
+      presets = (await api("/api/settings")).script_presets || [];
+      $("#create-preset").innerHTML = `<option value="">— 从常用脚本填入 —</option>` + presets.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join("");
+    } catch (_) {}
+    await loadCreateOptions();
+    $("#create-dialog").showModal();
+  });
+});
+$("#create-close").addEventListener("click", () => $("#create-dialog").close());
+$("#create-form").account.addEventListener("change", () => loadCreateOptions().catch((e) => toast(e.message, true)));
+$("#create-form").zone.addEventListener("change", loadMachineTypes);
+$("#create-form").spot.addEventListener("change", (e) => { if (e.target.checked) $("#create-form").auto_start.checked = true; });
+$("#create-preset").addEventListener("change", (e) => {
+  const p = presets[+e.target.value];
+  if (p) $("#create-form").startup_script.value = p.script;
+});
+$("#create-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  if (!f.machine_type.value) return toast("请选择机型", true);
+  const body = {
+    name: f.name.value.trim(), zone: f.zone.value, machine_type: f.machine_type.value, image: f.image.value,
+    disk_size_gb: +f.disk_size_gb.value, disk_type: f.disk_type.value, network_tier: f.network_tier.value,
+    spot: f.spot.checked, auto_ip: f.auto_ip.checked, auto_start: f.auto_start.checked, check_port: +f.check_port.value,
+    tags: f.tags.value.trim(), note: f.note.value.trim(), startup_script: f.startup_script.value, run_once: true,
+  };
+  $("#create-hint").textContent = "正在创建，通常需要 30-60 秒…";
+  await busy($("button[type=submit]", f), async () => {
+    try {
+      const r = await api(`/api/accounts/${f.account.value}/instances`, { method: "POST", body });
+      toast(`实例 ${r.instance.name} 已创建，IP ${r.instance.external_ip || "-"}`);
+      $("#create-dialog").close();
+      f.startup_script.value = ""; f.note.value = ""; f.tags.value = "";
+      loadInstances();
+    } finally { $("#create-hint").textContent = ""; }
+  });
+});
+
 // ---- 执行命令弹窗 ----
 let execInst = null;
 let execJob = null;
@@ -605,7 +705,7 @@ $("#probe-test-form").addEventListener("submit", async (e) => {
 });
 
 // ---------------- events ----------------
-const EVT = { firewall: "防火墙", exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
+const EVT = { create: "新建实例", delete: "删除实例", firewall: "防火墙", exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
 async function loadEvents() {
   try {
     const rows = await api("/api/events?limit=300");
@@ -622,7 +722,7 @@ function start() {
   switchTab("instances");
   clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
-    if (!$("#tab-instances").classList.contains("hidden") && !$("#inst-dialog").open && !$("#exec-dialog").open) loadInstances();
+    if (!$("#tab-instances").classList.contains("hidden") && !$("#inst-dialog").open && !$("#exec-dialog").open && !$("#create-dialog").open) loadInstances();
   }, 30000);
 }
 if (token) start(); else showMain(false);

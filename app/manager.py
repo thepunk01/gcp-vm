@@ -157,6 +157,7 @@ class Manager:
         region = region_of(inst["zone"])
         if old_ip and reason != "手动":
             self.db.add_blocked_ip(old_ip, inst["id"])
+        self._cleanup_leftover_addresses(client, inst, region)
         avoid = self.db.recent_blocked_ips()
         if old_ip:
             avoid.add(old_ip)
@@ -187,6 +188,23 @@ class Manager:
         )
         self._update_dns(inst, new_ip)
         return inst
+
+    def _cleanup_leftover_addresses(self, client, inst: dict, region: str) -> None:
+        """释放本系统创建、但已不再使用的静态地址（换 IP 被中断时可能残留），避免占满配额、产生费用。"""
+        try:
+            leftovers = [
+                a for a in client.list_addresses(region)
+                if a["name"].startswith(STATIC_PREFIX) and a["status"] == "RESERVED"
+            ]
+        except GCPError as e:
+            log.warning("[%s] 查询静态地址失败：%s", inst["name"], e)
+            return
+        for a in leftovers:
+            try:
+                client.release_address(region, a["name"])
+                self._event(inst, "change_ip", f"已释放残留的未使用静态地址 {a['name']}（{a['address']}）")
+            except GCPError as e:
+                log.warning("[%s] 释放残留地址 %s 失败：%s", inst["name"], a["name"], e)
 
     def _swap_ephemeral(self, client, inst, live, ac_name, tier, avoid: set[str]) -> str:
         """释放旧临时 IP 并重新分配，直到拿到不在规避列表里的 IP。

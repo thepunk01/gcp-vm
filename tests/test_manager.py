@@ -244,3 +244,13 @@ def test_static_mode_never_takes_blocked_ip(db, fake_gcp):
     assert sorted(x["address"] for x in fake_gcp.addresses.values()) == sorted([a["external_ip"], b["external_ip"]])
     c = mgr.change_ip(ids["vm1"], reason="自动-被墙")       # 再换：vm1 旧静态 IP 释放，不会再拿回任何被墙 IP
     assert c["external_ip"] not in db.recent_blocked_ips() - {c["external_ip"]} and c["external_ip"] != a["external_ip"]
+
+
+
+def test_change_ip_cleans_leftover_reserved_addresses(db, fake_gcp):
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    fake_gcp.addresses["gcpvm-vm1-old-1"] = {"address": "9.9.9.1", "region": "asia-east1"}   # 残留未使用
+    fake_gcp.addresses["my-own-ip"] = {"address": "9.9.9.2", "region": "asia-east1"}          # 用户自己的，不动
+    mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    assert "gcpvm-vm1-old-1" not in fake_gcp.addresses and "my-own-ip" in fake_gcp.addresses
+    assert any("残留" in e["message"] for e in db.list_events())

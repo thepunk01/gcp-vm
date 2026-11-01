@@ -370,6 +370,13 @@ class GCPClient:
         )
         return addr["address"]
 
+    def list_addresses(self, region: str) -> list[dict]:
+        data = self._request("GET", f"projects/{self.project}/regions/{region}/addresses")
+        return [
+            {"name": a.get("name", ""), "address": a.get("address", ""), "status": a.get("status", "")}
+            for a in data.get("items") or []
+        ]
+
     def release_address(self, region: str, name: str) -> None:
         op = self._request(
             "DELETE", f"projects/{self.project}/regions/{region}/addresses/{quote(name)}"

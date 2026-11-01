@@ -184,6 +184,13 @@ class FakeGCP:
         self.calls.append(("reserve", name))
         return ip
 
+    def list_addresses(self, region):
+        in_use = {i["ip"] for i in self.instances.values()}
+        return [
+            {"name": n, "address": a["address"], "status": "IN_USE" if a["address"] in in_use else "RESERVED"}
+            for n, a in self.addresses.items()
+        ]
+
     def release_address(self, region, name):
         self.calls.append(("release", name))
         addr = self.addresses.pop(name)["address"]

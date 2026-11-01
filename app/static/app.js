@@ -757,6 +757,17 @@ $("#settings-form").addEventListener("submit", async (e) => {
   for (const k of ["telegram_bot_token", "telegram_chat_id", "cf_api_token"]) body[k] = f.elements[k].value.trim();
   await busy($("button[type=submit]", f), async () => { await api("/api/settings", { method: "PUT", body }); toast("设置已保存"); loadSettings(); });
 });
+$("#tg-test").addEventListener("click", (e) => busy(e.currentTarget, async () => {
+  const f = $("#settings-form");
+  const res = await fetch("/api/telegram-test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ telegram_bot_token: f.telegram_bot_token.value.trim(), telegram_chat_id: f.telegram_chat_id.value.trim() }),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (res.status === 401) { logout(); throw new Error("登录已过期"); }
+  toast(r.message || r.error || `HTTP ${res.status}`, !r.ok);
+}));
 $("#probe-test-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.currentTarget;

@@ -504,6 +504,16 @@ def create_app(
         return JSONResponse(result.to_dict())
 
     @protected
+    async def telegram_test(request: Request):
+        from .integrations import test_telegram
+        data = await body(request)
+        saved = db.get_settings()
+        token = str(data.get("telegram_bot_token") or saved.get("telegram_bot_token") or "").strip()
+        chat = str(data.get("telegram_chat_id") or saved.get("telegram_chat_id") or "").strip()
+        ok, msg = await asyncio.to_thread(test_telegram, token, chat)
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    @protected
     async def run_cycle(_: Request):
         asyncio.get_running_loop().run_in_executor(None, manager.run_cycle)
         return JSONResponse({"ok": True, "message": "已触发一轮检测，结果见事件日志"})
@@ -577,6 +587,7 @@ def create_app(
         Route("/api/settings", put_settings, methods=["PUT"]),
         Route("/api/probe-test", test_probe, methods=["POST"]),
         Route("/api/run-check", run_cycle, methods=["POST"]),
+        Route("/api/telegram-test", telegram_test, methods=["POST"]),
         Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={HTTPException: http_error})

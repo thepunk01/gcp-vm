@@ -31,6 +31,35 @@ def send_telegram(settings: dict, text: str) -> bool:
         return False
 
 
+def test_telegram(token: str, chat_id: str) -> tuple[bool, str]:
+    """发送一条测试消息，返回 (是否成功, 说明)。"""
+    if not token or not chat_id:
+        return False, "请先填写 Telegram Bot Token 和 Chat ID"
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": "GCP-VM 测试通知：Telegram 通知配置正常 ✅"},
+            timeout=15,
+        )
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        return False, f"连接 Telegram 失败：{e}"
+    if data.get("ok"):
+        return True, "测试消息已发送，请在 Telegram 查看"
+    desc = str(data.get("description", ""))
+    hints = {
+        "Unauthorized": "Bot Token 无效（可能输错，或机器人已被删除 / Token 已重置）",
+        "chat not found": "找不到这个 Chat ID：确认 ID 正确，并且先给机器人发过消息，或已把机器人拉进群 / 频道",
+        "bot was blocked": "你屏蔽了这个机器人，请在 Telegram 里解除屏蔽",
+        "not enough rights": "机器人在群 / 频道里没有发消息权限（频道需设为管理员）",
+        "bot is not a member": "机器人不在这个群 / 频道里，请先把它拉进去",
+    }
+    for k, v in hints.items():
+        if k.lower() in desc.lower():
+            return False, f"{v}（{desc}）"
+    return False, f"发送失败：{desc or resp.status_code}"
+
+
 class DNSError(Exception):
     pass
 

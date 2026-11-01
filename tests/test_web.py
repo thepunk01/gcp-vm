@@ -159,3 +159,22 @@ def test_traffic_api(client, db):
     assert data["groups"][0]["name"] == "香港" and data["groups"][0]["online"] == 1
     assert "34.0.0.1" not in str(data) and "vm1" not in str(data)
     assert client.get("/status").status_code == 200
+
+
+def test_telegram_test_endpoint(client, monkeypatch):
+    from app import integrations
+
+    class R:
+        def __init__(self, d):
+            self.d, self.status_code = d, 200
+
+        def json(self):
+            return self.d
+
+    h = login(client)
+    assert client.post("/api/telegram-test", json={}, headers=h).status_code == 400
+    monkeypatch.setattr(integrations.requests, "post", lambda *a, **k: R({"ok": False, "description": "Bad Request: chat not found"}))
+    r = client.post("/api/telegram-test", json={"telegram_bot_token": "1:x", "telegram_chat_id": "1"}, headers=h)
+    assert r.status_code == 400 and "Chat ID" in r.json()["message"]
+    monkeypatch.setattr(integrations.requests, "post", lambda *a, **k: R({"ok": True}))
+    assert client.post("/api/telegram-test", json={"telegram_bot_token": "1:x", "telegram_chat_id": "1"}, headers=h).json()["ok"]

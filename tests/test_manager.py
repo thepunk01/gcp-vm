@@ -189,3 +189,16 @@ def test_change_ip_gives_up_instead_of_accepting_blocked_ip(db, fake_gcp):
     assert not any("IP 已更换" in e["message"] for e in ev)
     assert any("更换 IP 失败" in e["message"] for e in ev)
     assert fake_gcp.get_instance("asia-east1-b", "vm1")["external_ip"]  # 实例仍有外网 IP
+
+
+def test_change_ip_reports_hold_failure_reason(db, fake_gcp):
+    from app.gcp import GCPError
+    from app.manager import ManagerError
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+
+    def no_reserve(*a, **k):
+        raise GCPError("Quota 'STATIC_ADDRESSES' exceeded. Limit: 0.0")
+
+    fake_gcp.reserve_address = no_reserve
+    with pytest.raises(ManagerError, match="STATIC_ADDRESSES"):
+        mgr.change_ip(ids["vm1"], reason="自动-被墙")

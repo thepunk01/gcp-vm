@@ -194,6 +194,7 @@ class Manager:
         zone, name = inst["zone"], inst["name"]
         region = region_of(zone)
         held: list[str] = []
+        hold_errors: list[str] = []
         new_ip = ""
         stamp = datetime.now().strftime("%H%M%S")
         try:
@@ -208,6 +209,7 @@ class Manager:
                             held.append(hold)
                         except GCPError as e:
                             log.warning("[%s] 占住 IP %s 失败：%s", name, ip, e)
+                            hold_errors.append(str(e))
                     client.delete_access_config(zone, name, cur["nic_name"], cur["access_config_name"])
                 client.add_access_config(zone, name, live["nic_name"], ac_name, None, tier)
                 new_ip = client.get_instance(zone, name)["external_ip"]
@@ -216,9 +218,12 @@ class Manager:
                 log.info("[%s] 第 %d 次分配到的 IP %s 在规避列表中，重新分配", name, attempt, new_ip or "-")
             if not new_ip:
                 raise GCPError("未能分配到新的外网 IP")
+            reason = ""
+            if hold_errors:
+                reason = f"。原因：无法占住被墙 IP（升级为静态地址失败：{hold_errors[-1][:300]}），GCP 会把它重新分配回来"
             raise GCPError(
-                f"连续 {MAX_EPHEMERAL_TRIES} 次都分配到已知被墙的 IP（当前 {new_ip}），本次放弃，"
-                "下一轮检测会继续尝试；若持续如此，建议切换网络层级或换区域"
+                f"连续 {MAX_EPHEMERAL_TRIES} 次都分配到已知被墙的 IP（当前 {new_ip}），本次放弃{reason}；"
+                "下一轮检测会继续尝试，若持续如此，建议切换网络层级或换区域"
             )
         finally:
             for hold in held:

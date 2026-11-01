@@ -352,10 +352,15 @@ class GCPClient:
         items = data.get("items") or []
         return items[0] if items else None
 
-    def reserve_address(self, region: str, name: str, network_tier: str | None = None) -> str:
+    def reserve_address(
+        self, region: str, name: str, network_tier: str | None = None, address: str | None = None
+    ) -> str:
+        """预留外部静态地址；指定 address 时把实例正在使用的临时 IP 升级为静态（用来“占住”它）。"""
         body: dict[str, Any] = {"name": name, "addressType": "EXTERNAL"}
         if network_tier:
             body["networkTier"] = network_tier
+        if address:
+            body["address"] = address
         op = self._request(
             "POST", f"projects/{self.project}/regions/{region}/addresses", body=body
         )

@@ -32,6 +32,7 @@ class FakeGCP:
             }
         }
         self.addresses = {}  # name -> {address, region}
+        self.released = []  # 模拟 GCP 地址池：刚释放的临时 IP 会被优先分配回来（后进先出）
         self.metadata = {}  # (zone, name) -> {key: value}
         self.project_metadata = {}
         self.serial = ""
@@ -75,6 +76,9 @@ class FakeGCP:
         self.calls.append(("delete_ac", ac_name))
         i = self.instances[(zone, name)]
         assert i["ac"] == ac_name
+        held = {a["address"] for a in self.addresses.values()}
+        if i["ip"] and i["ip"] not in held:
+            self.released.append(i["ip"])
         i["ac"], i["ip"] = "", ""
 
     def add_access_config(self, zone, name, nic, ac_name="External NAT", nat_ip=None, network_tier=None):
@@ -85,7 +89,13 @@ class FakeGCP:
             raise GCPError("quota exceeded")
         i = self.instances[(zone, name)]
         assert not i["ac"], "access config already exists"
-        i["ac"], i["ip"] = ac_name, nat_ip or next(self.ip_seq)
+        if nat_ip:
+            ip = nat_ip
+        elif self.released:
+            ip = self.released.pop()
+        else:
+            ip = next(self.ip_seq)
+        i["ac"], i["ip"] = ac_name, ip
 
     def get_metadata(self, zone, name):
         return dict(self.metadata.get((zone, name), {}))
@@ -163,15 +173,17 @@ class FakeGCP:
                 return {"name": n, "address": ip}
         return None
 
-    def reserve_address(self, region, name, network_tier=None):
-        ip = next(self.ip_seq)
+    def reserve_address(self, region, name, network_tier=None, address=None):
+        ip = address or next(self.ip_seq)
         self.addresses[name] = {"address": ip, "region": region}
         self.calls.append(("reserve", name))
         return ip
 
     def release_address(self, region, name):
         self.calls.append(("release", name))
-        del self.addresses[name]
+        addr = self.addresses.pop(name)["address"]
+        if not any(i["ip"] == addr for i in self.instances.values()):
+            self.released.append(addr)
 
 
 class FakePool:

@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 
 STOPPED_STATES = {"TERMINATED", "STOPPED", "SUSPENDED"}
 STATIC_PREFIX = "gcpvm-"
+HOLD_PREFIX = "gcpvm-hold-"
+MAX_EPHEMERAL_TRIES = 6
 
 
 class ManagerError(Exception):
@@ -149,6 +151,8 @@ class Manager:
         ac_name = live["access_config_name"] or "External NAT"
         tier = live["network_tier"] or None
         region = region_of(inst["zone"])
+        if old_ip and reason != "手动":
+            self.db.add_blocked_ip(old_ip, inst["id"])
         avoid = self.db.recent_blocked_ips()
         if old_ip:
             avoid.add(old_ip)
@@ -170,8 +174,6 @@ class Manager:
                 self._event(inst, "change_ip", f"补回外网 IP 失败：{e2}", "error", notify=True)
             raise ManagerError(str(e)) from e
 
-        if old_ip and reason != "手动":
-            self.db.add_blocked_ip(old_ip, inst["id"])
         inst = self.db.update_instance(
             inst["id"], last_change_at=time.time(), fail_count=0, cn_state=STATE_UNKNOWN
         )
@@ -183,22 +185,47 @@ class Manager:
         return inst
 
     def _swap_ephemeral(self, client, inst, live, ac_name, tier, avoid: set[str]) -> str:
+        """释放旧临时 IP 并重新分配，直到拿到不在规避列表里的 IP。
+
+        GCP 常把刚释放的临时 IP 立刻分回来（包括别的实例刚因被墙释放的 IP）。
+        所以分到规避列表里的 IP 时，先把它升级成静态地址“占住”，让地址池无法再分配它，
+        换到可用 IP 后再统一释放这些占位地址。
+        """
+        zone, name = inst["zone"], inst["name"]
+        region = region_of(zone)
+        held: list[str] = []
         new_ip = ""
-        for attempt in range(1, 4):
-            if live["external_ip"] or attempt > 1:
-                cur = client.get_instance(inst["zone"], inst["name"])
+        stamp = datetime.now().strftime("%H%M%S")
+        try:
+            for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
+                cur = client.get_instance(zone, name)
                 if cur["access_config_name"]:
-                    client.delete_access_config(
-                        inst["zone"], inst["name"], cur["nic_name"], cur["access_config_name"]
-                    )
-            client.add_access_config(inst["zone"], inst["name"], live["nic_name"], ac_name, None, tier)
-            new_ip = client.get_instance(inst["zone"], inst["name"])["external_ip"]
-            if new_ip and new_ip not in avoid:
-                return new_ip
-            log.info("[%s] 第 %d 次分配到的 IP %s 在规避列表中，重新分配", inst["name"], attempt, new_ip)
-        if not new_ip:
-            raise GCPError("未能分配到新的外网 IP")
-        return new_ip
+                    ip = cur["external_ip"]
+                    if ip and ip in avoid:
+                        hold = f"{HOLD_PREFIX}{name}"[:48].rstrip("-") + f"-{stamp}-{attempt}"
+                        try:
+                            client.reserve_address(region, hold, tier, address=ip)
+                            held.append(hold)
+                        except GCPError as e:
+                            log.warning("[%s] 占住 IP %s 失败：%s", name, ip, e)
+                    client.delete_access_config(zone, name, cur["nic_name"], cur["access_config_name"])
+                client.add_access_config(zone, name, live["nic_name"], ac_name, None, tier)
+                new_ip = client.get_instance(zone, name)["external_ip"]
+                if new_ip and new_ip not in avoid:
+                    return new_ip
+                log.info("[%s] 第 %d 次分配到的 IP %s 在规避列表中，重新分配", name, attempt, new_ip or "-")
+            if not new_ip:
+                raise GCPError("未能分配到新的外网 IP")
+            raise GCPError(
+                f"连续 {MAX_EPHEMERAL_TRIES} 次都分配到已知被墙的 IP（当前 {new_ip}），本次放弃，"
+                "下一轮检测会继续尝试；若持续如此，建议切换网络层级或换区域"
+            )
+        finally:
+            for hold in held:
+                try:
+                    client.release_address(region, hold)
+                except GCPError as e:
+                    self._event(inst, "change_ip", f"释放占位地址 {hold} 失败：{e}，请到 GCP 控制台手动释放以免计费", "warn")
 
     def _swap_static(self, client, inst, live, region, ac_name, tier) -> str:
         old_ip = live["external_ip"]

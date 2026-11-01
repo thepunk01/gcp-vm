@@ -47,7 +47,10 @@ def test_change_ip_ephemeral(env):
     mgr, db, gcp, inst, _ = env
     out = mgr.change_ip(inst["id"])
     assert out["external_ip"] == "35.1.0.1"
-    assert gcp.calls == [("delete_ac", "External NAT"), ("add_ac", None)]
+    names = [c[0] for c in gcp.calls]
+    # 先占住旧 IP，再删除 / 新建 access config，最后释放占位地址
+    assert names == ["reserve", "delete_ac", "add_ac", "release"]
+    assert gcp.calls[0][1].startswith("gcpvm-hold-vm1-") and gcp.addresses == {}
 
 
 def test_change_ip_skips_previously_blocked(env):
@@ -145,3 +148,44 @@ def test_unmanaged_instance_untouched(env):
     mgr, db, gcp, inst, state = env
     mgr.run_cycle()
     assert gcp.calls == []
+
+
+# ---------------- 换 IP：不再分回被墙 IP ----------------
+def _mgr_two_vms(db, fake_gcp):
+    from app.manager import Manager
+    from tests.conftest import FAKE_KEY, FakePool
+    fake_gcp.instances[("asia-east1-b", "vm2")] = {"status": "RUNNING", "ip": "34.0.0.2", "ac": "External NAT", "tier": "PREMIUM"}
+    db.add_account("main", FAKE_KEY)
+    mgr = Manager(db, FakePool(fake_gcp))
+    mgr.sync_all()
+    ids = {i["name"]: i["id"] for i in db.list_instances()}
+    return mgr, ids
+
+
+def test_change_ip_never_returns_same_or_blocked_ip(db, fake_gcp):
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    # vm1 被墙换 IP：旧 IP 34.0.0.1 被占住，不会被分回来
+    inst = mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    assert inst["external_ip"] not in ("34.0.0.1", "")
+    # 占位地址已释放，34.0.0.1 回到地址池（地址池会优先分配它）
+    assert fake_gcp.addresses == {} and fake_gcp.released[-1] == "34.0.0.1"
+    # vm2 接着换 IP：地址池先给的是 vm1 刚释放的被墙 IP 34.0.0.1，必须拒绝
+    inst2 = mgr.change_ip(ids["vm2"], reason="自动-被墙")
+    assert inst2["external_ip"] not in ("34.0.0.1", "34.0.0.2", inst["external_ip"])
+    assert fake_gcp.addresses == {}
+    assert {"34.0.0.1", "34.0.0.2"} <= db.recent_blocked_ips()
+
+
+def test_change_ip_gives_up_instead_of_accepting_blocked_ip(db, fake_gcp):
+    from app.manager import ManagerError
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    # 让地址池只会分配已知被墙的 IP
+    for i in range(1, 200):
+        db.add_blocked_ip(f"35.1.0.{i}", None)
+    with pytest.raises(ManagerError, match="已知被墙"):
+        mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    assert fake_gcp.addresses == {}  # 占位地址全部释放
+    ev = db.list_events()
+    assert not any("IP 已更换" in e["message"] for e in ev)
+    assert any("更换 IP 失败" in e["message"] for e in ev)
+    assert fake_gcp.get_instance("asia-east1-b", "vm1")["external_ip"]  # 实例仍有外网 IP

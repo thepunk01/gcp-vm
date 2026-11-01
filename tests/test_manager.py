@@ -229,3 +229,18 @@ def test_change_ip_waits_when_cannot_hold(db, fake_gcp):
     inst = mgr.change_ip(ids["vm1"], reason="自动-被墙")
     assert inst["external_ip"] not in ("34.0.0.1", "")
     assert waits == [10, 20, 30]  # 每次占不住都等待后再申请，等待时间递增
+
+
+
+def test_static_mode_never_takes_blocked_ip(db, fake_gcp):
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    for iid in ids.values():
+        db.update_instance_config(iid, {"ip_mode": "static"})
+    a = mgr.change_ip(ids["vm1"], reason="自动-被墙")       # vm1 的 34.0.0.1 被墙，释放回地址池
+    assert a["external_ip"] != "34.0.0.1"
+    b = mgr.change_ip(ids["vm2"], reason="自动-被墙")       # 地址池会先给 34.0.0.1，必须拒绝
+    assert b["external_ip"] not in ("34.0.0.1", "34.0.0.2")
+    # 被拒绝的预留地址已释放，只剩两台实例各自正在使用的静态 IP
+    assert sorted(x["address"] for x in fake_gcp.addresses.values()) == sorted([a["external_ip"], b["external_ip"]])
+    c = mgr.change_ip(ids["vm1"], reason="自动-被墙")       # 再换：vm1 旧静态 IP 释放，不会再拿回任何被墙 IP
+    assert c["external_ip"] not in db.recent_blocked_ips() - {c["external_ip"]} and c["external_ip"] != a["external_ip"]

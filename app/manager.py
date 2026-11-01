@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 import time
 from datetime import datetime
@@ -162,7 +163,7 @@ class Manager:
 
         try:
             if inst["ip_mode"] == "static":
-                new_ip = self._swap_static(client, inst, live, region, ac_name, tier)
+                new_ip = self._swap_static(client, inst, live, region, ac_name, tier, avoid)
             else:
                 new_ip = self._swap_ephemeral(client, inst, live, ac_name, tier, avoid)
         except GCPError as e:
@@ -199,7 +200,7 @@ class Manager:
         held: list[str] = []
         hold_errors: list[str] = []
         new_ip = ""
-        stamp = datetime.now().strftime("%H%M%S")
+        stamp = datetime.now().strftime("%H%M%S") + secrets.token_hex(2)
         try:
             for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
                 cur = client.get_instance(zone, name)
@@ -240,21 +241,47 @@ class Manager:
                 except GCPError as e:
                     self._event(inst, "change_ip", f"释放占位地址 {hold} 失败：{e}，请到 GCP 控制台手动释放以免计费", "warn")
 
-    def _swap_static(self, client, inst, live, region, ac_name, tier) -> str:
+    def _swap_static(self, client, inst, live, region, ac_name, tier, avoid: set[str]) -> str:
+        """预留新的静态 IP 并绑定。预留到已知被墙的 IP 时先保留（占住）它、继续预留下一个，
+        拿到可用 IP 后再统一释放这些被拒绝的地址，保证不会换回被墙 IP。"""
         old_ip = live["external_ip"]
         old_addr = client.find_address_by_ip(region, old_ip) if old_ip else None
-        addr_name = f"{STATIC_PREFIX}{inst['name']}-{datetime.now().strftime('%Y%m%d%H%M%S')}"[:63]
-        new_ip = client.reserve_address(region, addr_name, tier)
+        base = (
+            f"{STATIC_PREFIX}{inst['name']}"[:40].rstrip("-")
+            + "-" + datetime.now().strftime("%m%d%H%M%S") + secrets.token_hex(2)
+        )
+        rejected: list[str] = []
+        new_ip, addr_name = "", ""
         try:
-            if live["access_config_name"]:
-                client.delete_access_config(inst["zone"], inst["name"], live["nic_name"], live["access_config_name"])
-            client.add_access_config(inst["zone"], inst["name"], live["nic_name"], ac_name, new_ip, tier)
-        except GCPError:
+            for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
+                name = f"{base}-{attempt}"
+                ip = client.reserve_address(region, name, tier)
+                if ip and ip not in avoid:
+                    new_ip, addr_name = ip, name
+                    break
+                log.info("[%s] 第 %d 次预留到的静态 IP %s 在规避列表中，先占住并重新预留", inst["name"], attempt, ip)
+                rejected.append(name)
+            if not new_ip:
+                raise GCPError(
+                    f"连续 {MAX_EPHEMERAL_TRIES} 次预留到的静态 IP 都是已知被墙的 IP，本次放弃；"
+                    "下一轮检测会继续尝试，若持续如此，建议切换网络层级或换区域"
+                )
             try:
-                client.release_address(region, addr_name)
+                if live["access_config_name"]:
+                    client.delete_access_config(inst["zone"], inst["name"], live["nic_name"], live["access_config_name"])
+                client.add_access_config(inst["zone"], inst["name"], live["nic_name"], ac_name, new_ip, tier)
             except GCPError:
-                pass
-            raise
+                try:
+                    client.release_address(region, addr_name)
+                except GCPError:
+                    pass
+                raise
+        finally:
+            for name in rejected:
+                try:
+                    client.release_address(region, name)
+                except GCPError as e:
+                    self._event(inst, "change_ip", f"释放被拒绝的静态地址 {name} 失败：{e}，请到 GCP 控制台手动释放以免计费", "warn")
         # 只释放本系统创建的旧静态 IP，用户自己预留的不动
         if old_addr and old_addr.get("name", "").startswith(STATIC_PREFIX):
             try:

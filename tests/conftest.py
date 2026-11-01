@@ -174,7 +174,12 @@ class FakeGCP:
         return None
 
     def reserve_address(self, region, name, network_tier=None, address=None):
-        ip = address or next(self.ip_seq)
+        if address:
+            ip = address
+        elif self.released:
+            ip = self.released.pop()  # 地址池优先给刚释放的 IP
+        else:
+            ip = next(self.ip_seq)
         self.addresses[name] = {"address": ip, "region": region}
         self.calls.append(("reserve", name))
         return ip

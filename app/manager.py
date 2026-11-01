@@ -34,6 +34,8 @@ STOPPED_STATES = {"TERMINATED", "STOPPED", "SUSPENDED"}
 STATIC_PREFIX = "gcpvm-"
 HOLD_PREFIX = "gcpvm-hold-"
 MAX_EPHEMERAL_TRIES = 6
+# 占不住被墙 IP 时（如没有静态 IP 配额），释放后等待一段时间再申请，避免立刻被分回同一个 IP
+RELEASE_WAITS = (10, 20, 30, 45, 60, 60)
 
 
 class ManagerError(Exception):
@@ -56,6 +58,7 @@ class Manager:
         self.ssh_runner = ssh_runner
         self.jobs = JobStore()
         self.traffic = TrafficHub()
+        self._sleep = time.sleep
         self._locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._cycle_lock = threading.Lock()
@@ -200,6 +203,7 @@ class Manager:
         try:
             for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
                 cur = client.get_instance(zone, name)
+                wait = 0
                 if cur["access_config_name"]:
                     ip = cur["external_ip"]
                     if ip and ip in avoid:
@@ -210,7 +214,11 @@ class Manager:
                         except GCPError as e:
                             log.warning("[%s] 占住 IP %s 失败：%s", name, ip, e)
                             hold_errors.append(str(e))
+                            wait = RELEASE_WAITS[min(attempt, len(RELEASE_WAITS)) - 1]
                     client.delete_access_config(zone, name, cur["nic_name"], cur["access_config_name"])
+                if wait:
+                    log.info("[%s] 无法占住被墙 IP，释放后等待 %d 秒再申请新 IP", name, wait)
+                    self._sleep(wait)
                 client.add_access_config(zone, name, live["nic_name"], ac_name, None, tier)
                 new_ip = client.get_instance(zone, name)["external_ip"]
                 if new_ip and new_ip not in avoid:

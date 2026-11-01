@@ -200,5 +200,32 @@ def test_change_ip_reports_hold_failure_reason(db, fake_gcp):
         raise GCPError("Quota 'STATIC_ADDRESSES' exceeded. Limit: 0.0")
 
     fake_gcp.reserve_address = no_reserve
+    mgr._sleep = lambda s: None
     with pytest.raises(ManagerError, match="STATIC_ADDRESSES"):
         mgr.change_ip(ids["vm1"], reason="自动-被墙")
+
+
+def test_change_ip_waits_when_cannot_hold(db, fake_gcp):
+    from app.gcp import GCPError
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    waits = []
+    mgr._sleep = waits.append
+
+    def no_reserve(*a, **k):
+        raise GCPError("Quota 'STATIC_ADDRESSES' exceeded. Limit: 0.0")
+
+    fake_gcp.reserve_address = no_reserve
+    # 模拟地址池：前两次把刚释放的被墙 IP 还回来，等待后才轮换到新 IP
+    real_add = fake_gcp.add_access_config
+    count = {"n": 0}
+
+    def add(zone, name, nic, ac_name="External NAT", nat_ip=None, network_tier=None):
+        count["n"] += 1
+        if count["n"] > 2:
+            fake_gcp.released.clear()
+        return real_add(zone, name, nic, ac_name, nat_ip, network_tier)
+
+    fake_gcp.add_access_config = add
+    inst = mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    assert inst["external_ip"] not in ("34.0.0.1", "")
+    assert waits == [10, 20, 30]  # 每次占不住都等待后再申请，等待时间递增

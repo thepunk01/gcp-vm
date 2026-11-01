@@ -367,7 +367,7 @@ def create_app(
     MAX_STREAMS = 300
 
     async def public_traffic_stream(request: Request):
-        """SSE：每秒推送一次各组速率。"""
+        """SSE：每 2 秒推送一次各组速率（与实例上报间隔一致）。"""
         key = request.query_params.get("key", "")
         if public_payload(key) is None:
             raise HTTPException(404, "not found")
@@ -384,7 +384,7 @@ def create_app(
                         yield "event: closed\ndata: {}\n\n"
                         return
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
             finally:
                 streams["n"] -= 1
 

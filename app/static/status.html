@@ -108,7 +108,7 @@ svg.chart { width: 100%; height: 38px; display: block; }
       </svg>
       <div style="min-width:0">
         <div class="title" id="title">实时速率</div>
-        <div class="sub">入口节点 · 每秒更新</div>
+        <div class="sub">入口节点 · 每 2 秒更新</div>
       </div>
     </div>
     <div class="live" id="live"><i></i>LIVE <span class="clock" id="clock">--:--:--</span></div>
@@ -139,7 +139,7 @@ if (params.get("bg") && /^(transparent|#[0-9a-fA-F]{3,8})$/.test(params.get("bg"
 const key = params.get("key") || "";
 const $id = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const HISTORY = 60;
+const HISTORY = 30;
 const MAX_DOTS = 10;
 const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -251,7 +251,7 @@ function showLive(ok, note) {
 function onData(data) {
   render(data);
   $id("clock").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  showLive(true, "数据每秒推送");
+  showLive(true, "数据每 2 秒推送");
 }
 function showInvalid() {
   $id("rows").innerHTML = ""; rows.clear();
@@ -259,7 +259,7 @@ function showInvalid() {
   showLive(false, "");
 }
 
-// 先确认链接有效，再建立 SSE 推送（每秒一次）；SSE 不可用时退回每 2 秒轮询
+// 先确认链接有效，再建立 SSE 推送（每 2 秒一次）；SSE 不可用时退回每 2 秒轮询
 let es = null;
 let timer = null;
 async function check() {

@@ -82,6 +82,6 @@ def test_manager_report_and_migration(tmp_path, fake_gcp):
         mgr.traffic_report(token, -1, 2)
 
 
-def test_agent_reports_every_second():
+def test_agent_reports_every_two_seconds():
     script = agent_install_script("https://p.example.com", "b" * 32)
-    assert "sleep 1\n" in script and "-A \"gcpvm-traffic/1.1\"" in script
+    assert "sleep 2\n" in script and "-A \"gcpvm-traffic/1.1\"" in script

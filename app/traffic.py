@@ -1,6 +1,6 @@
 """实例实时流量：VM 上报脚本、速率计算、按组汇总。
 
-每台实例上运行一个很小的 bash 脚本（systemd 服务），每秒把默认出口网卡的
+每台实例上运行一个很小的 bash 脚本（systemd 服务），每 2 秒把默认出口网卡的
 累计收发字节数上报到面板；面板用相邻两次的差值计算速率（bit/s）。
 """
 
@@ -10,7 +10,7 @@ import re
 import threading
 import time
 
-REPORT_INTERVAL = 1
+REPORT_INTERVAL = 2
 ONLINE_SECONDS = 10
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?$|^https?://\[[0-9A-Fa-f:]+\](:\d{1,5})?$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{32,64}$")

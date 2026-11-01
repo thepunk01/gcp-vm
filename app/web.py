@@ -16,7 +16,7 @@ import jwt
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -192,6 +192,54 @@ def create_app(
         await asyncio.to_thread(manager.delete_firewall, int_param(request), request.path_params["name"])
         return JSONResponse({"ok": True})
 
+    # ---- 自有服务器（非 GCP） ----
+    @protected
+    async def add_server(request: Request):
+        data = await body(request)
+        panel_url = str(data.get("panel_url") or "")
+        if panel_url:
+            from .traffic import normalize_panel_url
+            panel_url = normalize_panel_url(panel_url)
+        inst, job = await asyncio.to_thread(manager.add_server, data, panel_url)
+        return JSONResponse({"instance": _clean(inst), "job": job.summary() if job else None})
+
+    @protected
+    async def update_server(request: Request):
+        inst = await asyncio.to_thread(manager.update_server, int_param(request), await body(request))
+        return JSONResponse({"instance": _clean(inst)})
+
+    @protected
+    async def remove_server(request: Request):
+        await asyncio.to_thread(manager.remove_server, int_param(request))
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def server_bootstrap_cmd(request: Request):
+        """生成在服务器上执行的一键接入命令。"""
+        from .traffic import normalize_panel_url
+        iid = int_param(request)
+        inst = db.get_instance(iid)
+        if not inst or inst.get("provider") != "manual":
+            raise HTTPException(404, "服务器不存在")
+        panel = normalize_panel_url(str((await body(request)).get("panel_url", "")))
+        manager.server_bootstrap_script(iid, panel)  # 确保已生成令牌
+        token = db.get_instance(iid)["traffic_token"]
+        url = f"{panel}/api/servers/bootstrap.sh?token={token}&panel={panel}"
+        return JSONResponse({"command": f"curl -fsSL '{url}' | bash"})
+
+    async def server_bootstrap_sh(request: Request):
+        """服务器上 curl 获取的接入脚本（凭服务器自己的上报令牌）。"""
+        from .traffic import normalize_panel_url
+        token = request.query_params.get("token", "")
+        try:
+            panel = normalize_panel_url(request.query_params.get("panel", ""))
+        except ValueError:
+            raise HTTPException(400, "panel 参数不正确") from None
+        script = await asyncio.to_thread(manager.bootstrap_by_token, token, panel)
+        if script is None:
+            raise HTTPException(404, "not found")
+        return PlainTextResponse(script, headers={"Cache-Control": "no-store"})
+
     # ---- create / delete instance ----
     @protected
     async def create_options(request: Request):
@@ -219,6 +267,9 @@ def create_app(
             raise HTTPException(404, "实例不存在")
         if (await body(request)).get("confirm_name") != inst["name"]:
             raise ValueError("实例名称不匹配，未删除")
+        if inst.get("provider") == "manual":
+            await asyncio.to_thread(manager.remove_server, iid)
+            return JSONResponse({"ok": True})
         await asyncio.to_thread(manager.delete_instance, iid)
         return JSONResponse({"ok": True})
 
@@ -257,6 +308,8 @@ def create_app(
             inst = db.get_instance(iid)
             if not inst:
                 raise HTTPException(404, "实例不存在")
+            if inst.get("provider") == "manual":
+                return JSONResponse({"instance": _clean(inst)})
             inst = await asyncio.to_thread(manager._refresh, inst)
             return JSONResponse({"instance": _clean(inst)})
         raise HTTPException(400, "不支持的操作")
@@ -336,7 +389,7 @@ def create_app(
         token = header[7:] if header.lower().startswith("bearer ") else ""
         data = await body(request)
         try:
-            ok = await asyncio.to_thread(manager.traffic_report, token, data.get("rx"), data.get("tx"))
+            ok = await asyncio.to_thread(manager.traffic_report, token, data.get("rx"), data.get("tx"), data.get("svc"))
         except ManagerError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         if not ok:
@@ -466,6 +519,16 @@ def create_app(
             key = data.get("status_page_key", db.get_settings().get("status_page_key", ""))
             if data["status_page_enabled"] and not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", key or ""):
                 raise ValueError("公开速率页的访问密钥需为 16-64 位字母、数字、-、_")
+        if "service_alert_seconds" in data:
+            data["service_alert_seconds"] = int(data["service_alert_seconds"])
+            if data["service_alert_seconds"] < 20:
+                raise ValueError("服务监控判定时间不能小于 20 秒")
+        if "service_alert_enabled" in data:
+            data["service_alert_enabled"] = bool(data["service_alert_enabled"])
+        if "watch_service" in data:
+            data["watch_service"] = str(data["watch_service"]).strip()
+            if not re.fullmatch(r"[A-Za-z0-9@._-]{0,64}", data["watch_service"]):
+                raise ValueError("监控的服务名只能包含字母、数字和 @ . _ -")
         if "script_presets" in data:
             if not isinstance(data["script_presets"], list):
                 raise ValueError("script_presets 必须是列表")
@@ -539,15 +602,24 @@ def create_app(
             interval = max(30, int(db.get_settings().get("check_interval", 300)))
             await asyncio.sleep(max(5, interval - (time.time() - started)))
 
+    async def alert_loop():
+        await asyncio.sleep(10)
+        while True:
+            try:
+                await asyncio.to_thread(manager.check_alerts)
+            except Exception:  # noqa: BLE001
+                log.exception("服务监控检查出错")
+            await asyncio.sleep(10)
+
     @asynccontextmanager
     async def lifespan(_app):
         if not auth.password:
             log.warning("未设置 GCPVM_ADMIN_PASSWORD，将无法登录控制台！")
-        task = asyncio.create_task(monitor_loop()) if run_monitor else None
+        tasks = [asyncio.create_task(monitor_loop()), asyncio.create_task(alert_loop())] if run_monitor else []
         try:
             yield
         finally:
-            if task:
+            for task in tasks:
                 task.cancel()
 
     async def http_error(_: Request, exc: HTTPException):
@@ -567,6 +639,11 @@ def create_app(
         Route("/api/accounts", list_accounts),
         Route("/api/accounts", add_account, methods=["POST"]),
         Route("/api/accounts/{id}", delete_account, methods=["DELETE"]),
+        Route("/api/servers", add_server, methods=["POST"]),
+        Route("/api/servers/bootstrap.sh", server_bootstrap_sh),
+        Route("/api/servers/{id}", update_server, methods=["PATCH"]),
+        Route("/api/servers/{id}", remove_server, methods=["DELETE"]),
+        Route("/api/servers/{id}/bootstrap-command", server_bootstrap_cmd, methods=["POST"]),
         Route("/api/accounts/{id}/create-options", create_options),
         Route("/api/accounts/{id}/machine-types", machine_types),
         Route("/api/accounts/{id}/instances", create_instance, methods=["POST"]),

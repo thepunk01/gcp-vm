@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import threading
 import time
@@ -16,7 +17,7 @@ from .firewall import build_body, summarize
 from .provision import IMAGES, build_instance_body, filter_machine_types, sort_zones
 from .integrations import DNSError, send_telegram, update_cloudflare_a_record
 from .jobs import Job, JobStore
-from .traffic import TrafficHub, agent_install_script
+from .traffic import DOWN_STATES, SVC_STATE_RE, TrafficHub, agent_install_script, bootstrap_script
 from .remote import (
     MAX_SCRIPT_BYTES,
     RemoteError,
@@ -60,6 +61,9 @@ class Manager:
         self.jobs = JobStore()
         self.traffic = TrafficHub()
         self._sleep = time.sleep
+        self._started = time.time()
+        self._alert_state: dict[int, str] = {}
+        self._alert_since: dict[int, tuple[str, float]] = {}
         self._locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._cycle_lock = threading.Lock()
@@ -79,6 +83,12 @@ class Manager:
         inst = self.db.get_instance(instance_id)
         if not inst:
             raise ManagerError("实例不存在")
+        return inst
+
+    def _gcp_instance(self, instance_id: int) -> dict:
+        inst = self._instance(instance_id)
+        if inst.get("provider") == "manual":
+            raise ManagerError("自有服务器没有云厂商 API，不支持此操作（开关机 / 换 IP / 启动脚本等）")
         return inst
 
     def _event(self, inst: dict | None, type_: str, msg: str, level: str = "info", notify: bool = False):
@@ -116,7 +126,7 @@ class Manager:
     def power(self, instance_id: int, action: str, source: str = "手动") -> dict:
         if action not in ("start", "stop", "reset"):
             raise ManagerError("不支持的操作")
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         label = {"start": "开机", "stop": "关机", "reset": "重启"}[action]
         lock = self._lock_for(instance_id)
         if not lock.acquire(timeout=1):
@@ -138,7 +148,7 @@ class Manager:
 
     # ---------------- change ip ----------------
     def change_ip(self, instance_id: int, reason: str = "手动") -> dict:
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         lock = self._lock_for(instance_id)
         if not lock.acquire(timeout=1):
             raise ManagerError("该实例正在执行其他操作，请稍后")
@@ -343,6 +353,9 @@ class Manager:
         return None
 
     def process_instance(self, inst: dict, settings: dict) -> None:
+        if inst.get("provider") == "manual":
+            self._process_manual(inst, settings)
+            return
         if not (inst["auto_ip"] or inst["auto_start"]):
             return
         client = self._client(inst["account_id"])
@@ -390,6 +403,179 @@ class Manager:
             self.change_ip(inst["id"], reason="自动-被墙")
         except ManagerError:
             pass
+
+    def _process_manual(self, inst: dict, settings: dict) -> None:
+        """自有服务器：没有换 IP 的 API，只做被墙检测并通知（被墙 / 恢复各通知一次）。"""
+        if not inst["auto_ip"] or not inst["external_ip"]:
+            return
+        result = self.checker_cls(settings).check(inst["external_ip"], inst["check_port"])
+        now = time.time()
+        threshold = int(settings["fail_threshold"])
+        addr = f"{inst['external_ip']}:{inst['check_port']}"
+        if result.state == STATE_OK:
+            if inst["cn_state"] == STATE_BLOCKED and inst["fail_count"] >= threshold:
+                self._event(inst, "check", f"{addr} 国内已恢复可达", notify=True)
+            self.db.update_instance(inst["id"], cn_state=STATE_OK, fail_count=0, last_check=now)
+            return
+        if result.state in (STATE_UNKNOWN, STATE_DOWN):
+            if result.state != inst["cn_state"]:
+                self._event(inst, "check", result.detail, "warn")
+            self.db.update_instance(inst["id"], cn_state=result.state, last_check=now)
+            return
+        fails = inst["fail_count"] + 1
+        self.db.update_instance(inst["id"], cn_state=STATE_BLOCKED, fail_count=fails, last_check=now)
+        self._event(inst, "check", f"{addr} {result.detail}（{fails}/{threshold}）", "warn")
+        if fails == threshold:
+            self._event(
+                inst, "blocked",
+                f"疑似被墙：{addr} 国内不可达、海外可达（{result.detail}）。自有服务器无法自动换 IP，请到服务商后台更换 IP，"
+                "再在面板「设置」里更新 IP",
+                "error", notify=True,
+            )
+
+    # ---------------- 自有服务器 ----------------
+    @staticmethod
+    def _check_server_fields(data: dict, partial: bool = False) -> dict:
+        import ipaddress
+        out: dict = {}
+        if "name" in data or not partial:
+            name = str(data.get("name", "")).strip()
+            if not name or len(name) > 40:
+                raise ManagerError("服务器名称不能为空，最长 40 个字符")
+            out["name"] = name
+        if "ip" in data or not partial:
+            ip = str(data.get("ip", "")).strip()
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                raise ManagerError("请填写正确的服务器 IP") from None
+            out["ip"] = ip
+        if "ssh_port" in data or not partial:
+            raw = data.get("ssh_port")
+            try:
+                port = 22 if raw in (None, "") else int(raw)
+            except (TypeError, ValueError):
+                raise ManagerError("SSH 端口必须是数字") from None
+            if not 1 <= port <= 65535:
+                raise ManagerError("SSH 端口范围 1-65535")
+            out["ssh_port"] = port
+        if "ssh_user" in data or not partial:
+            user = str(data.get("ssh_user") or "root").strip()
+            if not re.fullmatch(r"[a-z_][a-z0-9_.-]{0,31}", user):
+                raise ManagerError("SSH 用户名格式不正确")
+            out["ssh_user"] = user
+        return out
+
+    def add_server(self, data: dict, panel_url: str = "") -> tuple[dict, Job | None]:
+        """添加自有服务器；填写了密码时，后台用密码登录一次，写入面板公钥并安装上报（密码不保存）。"""
+        fields = self._check_server_fields(data)
+        check_port = int(data.get("check_port") or 22)
+        if not 1 <= check_port <= 65535:
+            raise ManagerError("检测端口范围 1-65535")
+        try:
+            inst = self.db.add_manual_server(fields | {
+                "grp": str(data.get("grp") or "").strip()[:40],
+                "note": str(data.get("note") or "")[:200],
+                "check_port": check_port,
+                "auto_ip": bool(data.get("auto_ip", True)),
+            })
+        except Exception as e:  # sqlite3.IntegrityError
+            if "UNIQUE" in str(e):
+                raise ManagerError(f"已有同名服务器：{fields['name']}") from None
+            raise
+        self._event(inst, "server", f"添加自有服务器 {fields['ip']}")
+        job = None
+        password = str(data.get("password") or "")
+        if password:
+            if not panel_url:
+                raise ManagerError("缺少面板地址，无法生成上报脚本")
+            script = self.server_bootstrap_script(inst["id"], panel_url)
+            job = self.jobs.create(inst["id"], inst["name"], "# 接入面板（写入公钥 + 安装上报）")
+            threading.Thread(
+                target=self._exec_job, args=(job, inst, script, 600, password), daemon=True, name=f"bootstrap-{job.id}"
+            ).start()
+        return inst, job
+
+    def update_server(self, instance_id: int, data: dict) -> dict:
+        inst = self._instance(instance_id)
+        if inst.get("provider") != "manual":
+            raise ManagerError("只能修改自有服务器的连接信息")
+        fields = self._check_server_fields(data, partial=True)
+        if "ip" in fields and fields["ip"] != inst["external_ip"]:
+            self._event(inst, "server", f"IP 已手动更新：{inst['external_ip']} -> {fields['ip']}", "warn")
+            self.db.update_instance(instance_id, cn_state=STATE_UNKNOWN, fail_count=0)
+        return self.db.update_manual_server(instance_id, fields)  # type: ignore[return-value]
+
+    def remove_server(self, instance_id: int) -> None:
+        inst = self._instance(instance_id)
+        if inst.get("provider") != "manual":
+            raise ManagerError("GCP 实例请用「删除实例」")
+        self._event(inst, "server", "已从面板移除（不影响服务器本身）", "warn")
+        self.db.delete_instance(instance_id)
+
+    def server_bootstrap_script(self, instance_id: int, panel_url: str) -> str:
+        inst = self._instance(instance_id)
+        svc = str(self.db.get_settings().get("watch_service") or "")
+        return bootstrap_script(panel_url, self._traffic_token(inst), self.ssh_key.authorized_keys_line(), svc)
+
+    def bootstrap_by_token(self, token: str, panel_url: str) -> str | None:
+        inst = self.db.find_instance_by_traffic_token(token)
+        if not inst:
+            return None
+        return self.server_bootstrap_script(inst["id"], panel_url)
+
+    # ---------------- 服务监控告警 ----------------
+    def check_alerts(self, now: float | None = None) -> None:
+        """检查已安装上报的实例 / 服务器：上报中断（失联）、转发服务停止，持续超过设定时间就通知，恢复时再通知。"""
+        settings = self.db.get_settings()
+        if not settings.get("service_alert_enabled", True):
+            return
+        now = time.time() if now is None else now
+        grace = max(20, int(settings.get("service_alert_seconds", 60)))
+        svc_name = settings.get("watch_service") or "服务"
+        for inst in self.db.list_instances():
+            iid = inst["id"]
+            if not inst.get("traffic_token"):
+                continue
+            if inst.get("provider") != "manual" and inst["status"] != "RUNNING":
+                self._alert_since.pop(iid, None)
+                continue
+            lock = self._locks.get(iid)
+            if lock and lock.locked():  # 正在换 IP 等操作，上报中断属正常
+                continue
+            r = self.traffic.instance_rate(iid, now)
+            seen = r["last_seen"]
+            if not seen and now - self._started < grace * 2:
+                continue  # 面板刚启动，等第一批上报
+            if not seen or now - seen > grace:
+                cur = "lost"
+            elif r["svc"] in DOWN_STATES:
+                cur = "svc_down"
+            else:
+                cur = "ok"
+            notified = self._alert_state.get(iid, "ok")
+            ip = inst["external_ip"] or "-"
+            if cur == "ok":
+                self._alert_since.pop(iid, None)
+                if notified != "ok":
+                    self._event(inst, "alert", f"已恢复正常（{svc_name} 运行中，上报正常），IP {ip}", notify=True)
+                    self._alert_state[iid] = "ok"
+                continue
+            prev = self._alert_since.get(iid)
+            since = prev[1] if prev and prev[0] == cur else now
+            self._alert_since[iid] = (cur, since)
+            if cur == notified:
+                continue
+            if cur == "lost":
+                ago = int(now - seen) if seen else None
+                msg = (f"失联：已 {ago} 秒没有收到上报" if ago is not None else "失联：面板启动后一直没有收到上报") + \
+                    f"（服务器可能宕机、网络中断或上报服务停止），IP {ip}"
+            else:
+                if now - since < grace:
+                    continue
+                msg = f"{svc_name} 已停止（状态 {r['svc']}），转发不可用，IP {ip}"
+            self._event(inst, "alert", msg, "error", notify=True)
+            self._alert_state[iid] = cur
 
     def run_cycle(self) -> None:
         """执行一轮自动检测。"""
@@ -456,7 +642,7 @@ class Manager:
         script = self._check_script(script)
         timeout = max(10, min(int(timeout or 600), 3600))
         inst = self._instance(instance_id)
-        if inst["status"] != "RUNNING":
+        if inst.get("provider") != "manual" and inst["status"] != "RUNNING":
             raise ManagerError("实例未运行，无法通过 SSH 执行。可改用「启动脚本」")
         if not inst["external_ip"]:
             raise ManagerError("实例没有外网 IP，无法 SSH 连接")
@@ -468,18 +654,36 @@ class Manager:
         ).start()
         return job
 
-    def _exec_job(self, job: Job, inst: dict, script: str, timeout: int) -> None:
+    def _exec_job(self, job: Job, inst: dict, script: str, timeout: int, password: str | None = None) -> None:
         first_line = next((ln.strip() for ln in script.splitlines() if ln.strip()), "")[:80]
         try:
-            job.append(f"[gcpvm] 连接 {self.ssh_key.user}@{inst['external_ip']}…\n")
-            added = self.ensure_ssh_key(inst)
-            if added:
-                job.append("[gcpvm] 已写入 SSH 公钥，等待实例生效（通常 10-30 秒）…\n")
-            code = self.ssh_runner(
-                inst["external_ip"], script, self.ssh_key.private_path, job.append,
-                user=self.ssh_key.user, timeout=timeout,
-                auth_wait=120 if added else 30, cancelled=lambda: job.cancelled,
-            )
+            if inst.get("provider") == "manual":
+                user = inst.get("ssh_user") or "root"
+                port = int(inst.get("ssh_port") or 22)
+                job.append(f"[gcpvm] 连接 {user}@{inst['external_ip']}:{port}{'（密码登录）' if password else ''}…\n")
+                try:
+                    code = self.ssh_runner(
+                        inst["external_ip"], script, self.ssh_key.private_path, job.append,
+                        user=user, port=port, timeout=timeout, auth_wait=0 if password else 5,
+                        cancelled=lambda: job.cancelled, password=password,
+                    )
+                except RemoteError as e:
+                    if "认证失败" in str(e) and not password:
+                        raise RemoteError(
+                            "SSH 认证失败：面板公钥还没写入这台服务器。请在服务器上执行「接入命令」，"
+                            "或在账号页用 root 密码重新接入"
+                        ) from e
+                    raise
+            else:
+                job.append(f"[gcpvm] 连接 {self.ssh_key.user}@{inst['external_ip']}…\n")
+                added = self.ensure_ssh_key(inst)
+                if added:
+                    job.append("[gcpvm] 已写入 SSH 公钥，等待实例生效（通常 10-30 秒）…\n")
+                code = self.ssh_runner(
+                    inst["external_ip"], script, self.ssh_key.private_path, job.append,
+                    user=self.ssh_key.user, timeout=timeout,
+                    auth_wait=120 if added else 30, cancelled=lambda: job.cancelled,
+                )
             job.append(f"\n[gcpvm] 执行结束，退出码 {code}\n")
             job.finish("ok" if code == 0 else "failed", code)
             self._event(
@@ -499,7 +703,7 @@ class Manager:
 
     # ---------------- startup script ----------------
     def get_startup_script(self, instance_id: int) -> dict:
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         meta = self._client(inst["account_id"]).get_metadata(inst["zone"], inst["name"])
         script, run_once = unwrap_startup_script(meta.get("startup-script", ""))
         return {"script": script, "run_once": run_once, "has_script": bool(script)}
@@ -508,7 +712,7 @@ class Manager:
         self, instance_id: int, script: str, run_once: bool = True, reboot: bool = False
     ) -> dict:
         script = self._check_script(script)
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         lock = self._lock_for(instance_id)
         if not lock.acquire(timeout=1):
             raise ManagerError("该实例正在执行其他操作，请稍后")
@@ -535,14 +739,14 @@ class Manager:
             lock.release()
 
     def clear_startup_script(self, instance_id: int) -> None:
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         self._client(inst["account_id"]).set_metadata(
             inst["zone"], inst["name"], {"startup-script": None}
         )
         self._event(inst, "startup", "已清除启动脚本")
 
     def serial_log(self, instance_id: int, start: int | None = None, only_startup: bool = True) -> dict:
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         data = self._client(inst["account_id"]).get_serial_output(inst["zone"], inst["name"], start)
         contents = data.get("contents", "")
         if only_startup:
@@ -667,7 +871,7 @@ class Manager:
         return inst
 
     def delete_instance(self, instance_id: int) -> None:
-        inst = self._instance(instance_id)
+        inst = self._gcp_instance(instance_id)
         lock = self._lock_for(instance_id)
         if not lock.acquire(timeout=1):
             raise ManagerError("该实例正在执行其他操作，请稍后")
@@ -701,16 +905,19 @@ class Manager:
             lock.release()
 
     # ---------------- traffic ----------------
-    def traffic_agent_script(self, instance_id: int, panel_url: str) -> str:
-        import secrets
-        inst = self._instance(instance_id)
+    def _traffic_token(self, inst: dict) -> str:
         token = inst.get("traffic_token") or ""
         if not token:
             token = secrets.token_hex(16)
-            self.db.update_instance(instance_id, traffic_token=token)
-        return agent_install_script(panel_url, token)
+            self.db.update_instance(inst["id"], traffic_token=token)
+        return token
 
-    def traffic_report(self, token: str, rx, tx) -> bool:
+    def traffic_agent_script(self, instance_id: int, panel_url: str) -> str:
+        inst = self._instance(instance_id)
+        svc = str(self.db.get_settings().get("watch_service") or "")
+        return agent_install_script(panel_url, self._traffic_token(inst), svc)
+
+    def traffic_report(self, token: str, rx, tx, svc=None) -> bool:
         inst = self.db.find_instance_by_traffic_token(token)
         if not inst:
             return False
@@ -720,5 +927,8 @@ class Manager:
             raise ManagerError("rx / tx 必须是整数") from None
         if rx_i < 0 or tx_i < 0:
             raise ManagerError("rx / tx 不能为负数")
-        self.traffic.report(inst["id"], rx_i, tx_i)
+        svc_s = str(svc) if svc is not None else None
+        if svc_s is not None and not SVC_STATE_RE.match(svc_s):
+            svc_s = None
+        self.traffic.report(inst["id"], rx_i, tx_i, svc=svc_s)
         return True

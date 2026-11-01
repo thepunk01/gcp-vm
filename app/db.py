@@ -104,9 +104,17 @@ class Database:
     def _migrate(self) -> None:
         """为旧数据库补充新增的列。"""
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(instances)")}
-        for name, ddl in (("grp", "TEXT DEFAULT ''"), ("traffic_token", "TEXT DEFAULT ''")):
+        for name, ddl in (
+            ("grp", "TEXT DEFAULT ''"),
+            ("traffic_token", "TEXT DEFAULT ''"),
+            ("ssh_port", "INTEGER DEFAULT 22"),
+            ("ssh_user", "TEXT DEFAULT ''"),
+        ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE instances ADD COLUMN {name} {ddl}")
+        acols = {r[1] for r in self._conn.execute("PRAGMA table_info(accounts)")}
+        if "kind" not in acols:
+            self._conn.execute("ALTER TABLE accounts ADD COLUMN kind TEXT DEFAULT 'gcp'")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -156,10 +164,39 @@ class Database:
             )
             return self.get_account(cur.lastrowid, with_key=False)  # type: ignore[arg-type]
 
-    def list_accounts(self) -> list[dict]:
-        return self._all(
-            "SELECT id, name, project_id, client_email, created_at FROM accounts ORDER BY id"
-        )
+    def list_accounts(self, kind: str | None = "gcp") -> list[dict]:
+        """默认只列 GCP 账号；kind=None 列出全部（含「自有服务器」内置账号）。"""
+        cols = "id, name, project_id, client_email, created_at, kind"
+        if kind is None:
+            return self._all(f"SELECT {cols} FROM accounts ORDER BY id")
+        return self._all(f"SELECT {cols} FROM accounts WHERE COALESCE(kind, 'gcp') = ? ORDER BY id", (kind,))
+
+    def manual_account_id(self) -> int:
+        """「自有服务器」（非 GCP）挂在一个内置账号下，不存任何密钥。"""
+        row = self._one("SELECT id FROM accounts WHERE kind = 'manual' ORDER BY id LIMIT 1")
+        if row:
+            return row["id"]
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO accounts(name, project_id, client_email, key_json, created_at, kind) "
+                "VALUES('自有服务器', 'manual', '', '{}', ?, 'manual')",
+                (time.time(),),
+            )
+            return int(cur.lastrowid)
+
+    def add_manual_server(self, data: dict) -> dict:
+        aid = self.manual_account_id()
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO instances(account_id, project, zone, name, machine_type, status, external_ip,
+                       internal_ip, network_tier, preemptible, auto_ip, auto_start, check_port, ip_mode,
+                       note, grp, ssh_port, ssh_user, synced_at)
+                   VALUES(?, 'manual', 'self', ?, '', 'RUNNING', ?, '', '', 0, ?, 0, ?, 'manual', ?, ?, ?, ?, ?)""",
+                (aid, data["name"], data["ip"], int(bool(data.get("auto_ip", True))), int(data.get("check_port", 22)),
+                 data.get("note", ""), data.get("grp", ""), int(data.get("ssh_port", 22)), data.get("ssh_user", "root"),
+                 time.time()),
+            )
+            return self.get_instance(int(cur.lastrowid))  # type: ignore[return-value]
 
     def get_account(self, account_id: int, with_key: bool = True) -> dict | None:
         cols = "*" if with_key else "id, name, project_id, client_email, created_at"
@@ -225,13 +262,13 @@ class Database:
 
     def list_instances(self) -> list[dict]:
         return self._all(
-            "SELECT i.*, a.name AS account_name FROM instances i "
-            "JOIN accounts a ON a.id = i.account_id ORDER BY a.id, i.zone, i.name"
+            "SELECT i.*, a.name AS account_name, COALESCE(a.kind, 'gcp') AS provider FROM instances i "
+            "JOIN accounts a ON a.id = i.account_id ORDER BY COALESCE(a.kind, 'gcp'), a.id, i.zone, i.name"
         )
 
     def get_instance(self, instance_id: int) -> dict | None:
         return self._one(
-            "SELECT i.*, a.name AS account_name FROM instances i "
+            "SELECT i.*, a.name AS account_name, COALESCE(a.kind, 'gcp') AS provider FROM instances i "
             "JOIN accounts a ON a.id = i.account_id WHERE i.id = ?",
             (instance_id,),
         )
@@ -267,6 +304,18 @@ class Database:
         if not token:
             return None
         return self._one("SELECT id, name, grp FROM instances WHERE traffic_token = ?", (token,))
+
+    def update_manual_server(self, instance_id: int, values: dict) -> dict | None:
+        fields: dict[str, Any] = {}
+        if "ip" in values:
+            fields["external_ip"] = values["ip"]
+        if "name" in values:
+            fields["name"] = values["name"]
+        if "ssh_port" in values:
+            fields["ssh_port"] = int(values["ssh_port"])
+        if "ssh_user" in values:
+            fields["ssh_user"] = values["ssh_user"]
+        return self.update_instance(instance_id, **fields)
 
     # ---------------- events ----------------
     def add_event(

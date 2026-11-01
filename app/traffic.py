@@ -14,19 +14,25 @@ REPORT_INTERVAL = 2
 ONLINE_SECONDS = 10
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?$|^https?://\[[0-9A-Fa-f:]+\](:\d{1,5})?$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{32,64}$")
+SVC_RE = re.compile(r"^[A-Za-z0-9@._-]{0,64}$")
+SVC_STATE_RE = re.compile(r"^[a-z-]{1,20}$")
+DOWN_STATES = {"inactive", "failed"}
 
 AGENT_LOOP = r'''#!/bin/bash
 # gcpvm 流量上报：每 __INTERVAL__ 秒上报默认出口网卡的累计收发字节数
 URL="__URL__/api/traffic-agent/report"
 TOKEN="__TOKEN__"
+SVC="__SVC__"
 while true; do
   IF=$(ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
   [ -n "$IF" ] || IF=$(awk -F: 'NR>2 {gsub(/ /,"",$1); if ($1!="lo") {print $1; exit}}' /proc/net/dev)
+  ST=none
+  if [ -n "$SVC" ] && systemctl cat "$SVC" >/dev/null 2>&1; then ST=$(systemctl is-active "$SVC" 2>/dev/null | head -1); fi
   set -- $(sed 's/:/ /' /proc/net/dev | awk -v i="$IF" '$1==i {print $2, $10}')
   if [ -n "$1" ] && [ -n "$2" ]; then
     curl -fsS -m 3 --connect-timeout 2 -A "gcpvm-traffic/1.1" -o /dev/null -X POST "$URL" \
       -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-      -d "{\"rx\":$1,\"tx\":$2,\"iface\":\"$IF\"}" || true
+      -d "{\"rx\":$1,\"tx\":$2,\"iface\":\"$IF\",\"svc\":\"$ST\"}" || true
   fi
   sleep __INTERVAL__
 done
@@ -76,14 +82,33 @@ def normalize_panel_url(url: str) -> str:
     return url
 
 
-def agent_install_script(panel_url: str, token: str) -> str:
+def agent_install_script(panel_url: str, token: str, svc: str = "nyanpass") -> str:
     url = normalize_panel_url(panel_url)
     if not TOKEN_RE.match(token):
         raise ValueError("上报令牌格式不正确")
-    loop = AGENT_LOOP.replace("__URL__", url).replace("__TOKEN__", token).replace(
-        "__INTERVAL__", str(REPORT_INTERVAL)
+    if not SVC_RE.match(svc or ""):
+        raise ValueError("监控的服务名格式不正确")
+    loop = (
+        AGENT_LOOP.replace("__URL__", url).replace("__TOKEN__", token)
+        .replace("__INTERVAL__", str(REPORT_INTERVAL)).replace("__SVC__", svc or "")
     )
     return INSTALL.replace("__LOOP__", loop).replace("__URL__", url)
+
+
+def bootstrap_script(panel_url: str, token: str, pubkey_line: str, svc: str = "nyanpass") -> str:
+    """自有服务器一键接入：写入面板 SSH 公钥（root），并安装流量 / 服务状态上报。"""
+    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+ [A-Za-z0-9@._-]+", pubkey_line or ""):
+        raise ValueError("面板公钥格式不正确")
+    install = agent_install_script(panel_url, token, svc)
+    return f"""#!/bin/bash
+# gcpvm: 接入面板（写入面板 SSH 公钥 + 安装上报）
+if [ "$(id -u)" != "0" ]; then echo "gcpvm: 请用 root 执行"; exit 1; fi
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+sed -i '/ gcpvm-panel$/d' /root/.ssh/authorized_keys
+echo '{pubkey_line}' >> /root/.ssh/authorized_keys
+echo "gcpvm: 已写入面板 SSH 公钥"
+{install}"""
 
 
 class TrafficHub:
@@ -94,10 +119,13 @@ class TrafficHub:
         self._samples: dict[int, tuple[float, int, int]] = {}
         self._rates: dict[int, tuple[float, float]] = {}
         self._seen: dict[int, float] = {}
+        self._svc: dict[int, str] = {}
 
-    def report(self, instance_id: int, rx: int, tx: int, now: float | None = None) -> None:
+    def report(self, instance_id: int, rx: int, tx: int, now: float | None = None, svc: str | None = None) -> None:
         now = time.time() if now is None else now
         with self._lock:
+            if svc is not None:
+                self._svc[instance_id] = svc
             prev = self._samples.get(instance_id)
             self._samples[instance_id] = (now, rx, tx)
             self._seen[instance_id] = now
@@ -113,7 +141,10 @@ class TrafficHub:
         seen = self._seen.get(instance_id, 0.0)
         online = now - seen < ONLINE_SECONDS
         rx, tx = self._rates.get(instance_id, (0.0, 0.0)) if online else (0.0, 0.0)
-        return {"online": online, "rx_bps": round(rx), "tx_bps": round(tx), "last_seen": seen}
+        return {
+            "online": online, "rx_bps": round(rx), "tx_bps": round(tx), "last_seen": seen,
+            "svc": self._svc.get(instance_id, ""),
+        }
 
     def all_rates(self, instances: list[dict], now: float | None = None) -> dict[int, dict]:
         return {i["id"]: self.instance_rate(i["id"], now) for i in instances}
@@ -128,7 +159,7 @@ class TrafficHub:
             g = out.setdefault(name, {"name": name, "total": 0, "online": 0, "rx_bps": 0, "tx_bps": 0})
             g["total"] += 1
             r = self.instance_rate(inst["id"], now)
-            if r["online"]:
+            if r["online"] and r["svc"] not in DOWN_STATES:  # 转发服务停了也算离线
                 g["online"] += 1
                 g["rx_bps"] += r["rx_bps"]
                 g["tx_bps"] += r["tx_bps"]

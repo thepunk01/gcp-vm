@@ -91,13 +91,22 @@ function fmtBps(bps) {
 function rateText(id) {
   const r = rates[id];
   if (!r || !r.last_seen) return "";
-  if (!r.online) return "流量上报离线";
-  return `↓ <b>${fmtBps(r.rx_bps)}</b> · ↑ <b>${fmtBps(r.tx_bps)}</b>`;
+  if (!r.online) return `<span style="color:var(--bad)">上报中断（失联）</span>`;
+  let svc = "";
+  if (r.svc && r.svc !== "none") {
+    svc = r.svc === "active" ? ` · <span style="color:var(--ok)">服务运行中</span>` : ` · <span style="color:var(--bad)">服务${r.svc === "inactive" ? "已停止" : " " + esc(r.svc)}</span>`;
+  }
+  return `↓ <b>${fmtBps(r.rx_bps)}</b> · ↑ <b>${fmtBps(r.tx_bps)}</b>${svc}`;
 }
 async function loadRates() {
   try {
     rates = await api("/api/traffic");
     $$("[data-rate]").forEach((el) => (el.innerHTML = rateText(el.dataset.rate)));
+    $$("[data-status]").forEach((el) => {
+      const r = rates[el.dataset.status];
+      const [st, stc] = !r || !r.last_seen ? ["未接入上报", "idle"] : r.online ? ["在线", "ok"] : ["失联", "bad"];
+      el.textContent = st; el.className = `badge ${stc}`;
+    });
   } catch (_) {}
 }
 
@@ -110,14 +119,15 @@ function renderInstances() {
   const running = instances.filter((i) => i.status === "RUNNING").length;
   const blocked = instances.filter((i) => i.cn_state === "blocked").length;
   const auto = instances.filter((i) => i.auto_ip).length;
-  $("#stats").innerHTML = `<span><b>${instances.length}</b>台实例</span><span><b>${running}</b>运行中</span><span><b>${auto}</b>开启自动换 IP</span><span><b style="color:var(--bad)">${blocked}</b>疑似被墙</span>`;
+  $("#stats").innerHTML = `<span><b>${instances.length}</b>台实例</span><span><b>${running}</b>运行中</span><span><b>${auto}</b>开启被墙检测</span><span><b style="color:var(--bad)">${blocked}</b>疑似被墙</span>`;
 
   const box = $("#instances");
   if (!instances.length) {
-    box.innerHTML = `<div class="empty">还没有实例。先到「账号」页添加 GCP 服务账号，然后点击「从 GCP 同步」。</div>`;
+    box.innerHTML = `<div class="empty">还没有实例。到「账号」页添加 GCP 服务账号（然后点「从 GCP 同步」），或添加自有服务器。</div>`;
     return;
   }
   box.innerHTML = instances.map((i) => {
+    if (i.provider === "manual") return manualCard(i);
     const [st, stc] = STATUS[i.status] || [i.status || "未知", "idle"];
     const [cn, cnc] = CN[i.cn_state] || CN.unknown;
     const running = i.status === "RUNNING";
@@ -154,6 +164,37 @@ function renderInstances() {
       </div>
     </div>`;
   }).join("");
+}
+
+function manualCard(i) {
+  const r = rates[i.id];
+  const [st, stc] = !r || !r.last_seen ? ["未接入上报", "idle"] : r.online ? ["在线", "ok"] : ["失联", "bad"];
+  const [cn, cnc] = CN[i.cn_state] || CN.unknown;
+  return `<div class="card" data-id="${i.id}">
+    <div>
+      <div class="name">${esc(i.name)}</div>
+      <div class="sub">自有服务器 · SSH ${esc(i.ssh_user || "root")} · 端口 ${i.ssh_port || 22}</div>
+      ${i.note ? `<div class="sub">${esc(i.note)}</div>` : ""}
+    </div>
+    <div>
+      <div class="ip" title="点击复制" data-copy="${esc(i.external_ip)}">${esc(i.external_ip)}</div>
+      <div class="rate-live" data-rate="${i.id}">${rateText(i.id)}</div>
+    </div>
+    <div>
+      <div class="flags"><span class="badge ${stc}" data-status="${i.id}">${st}</span><span class="badge ${cnc}" title="上次检测 ${fmtTime(i.last_check)}">${cn}${i.cn_state === "blocked" ? ` ${i.fail_count}` : ""}</span></div>
+      <div class="flags">
+        <span class="tag ${i.auto_ip ? "on" : ""}">被墙检测 ${i.auto_ip ? "开" : "关"}</span>
+        <span class="tag">端口 ${i.check_port}</span>
+        <span class="tag">自有</span>
+        ${i.grp ? `<span class="tag on">${esc(i.grp)}</span>` : ""}
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn small" data-act="check">检测</button>
+      <button class="btn small ghost" data-act="exec">命令</button>
+      <button class="btn small ghost" data-act="settings">设置</button>
+    </div>
+  </div>`;
 }
 
 const CONFIRM = {
@@ -218,12 +259,35 @@ function openSettings(inst) {
   f.dns_record.value = inst.dns_record || "";
   f.note.value = inst.note || "";
   f.grp.value = inst.grp || "";
+  const manual = inst.provider === "manual";
+  $("#manual-fields").classList.toggle("hidden", !manual);
+  $("#gcp-fields").classList.toggle("hidden", manual);
+  $("#gcp-fields-2").classList.toggle("hidden", manual);
+  $("#auto-ip-label").textContent = manual ? "被墙检测并通知（自有服务器无法自动换 IP）" : "被墙自动更换 IP";
+  $("#inst-delete").textContent = manual ? "从面板移除" : "删除实例";
+  $("#inst-dialog-title").textContent = `${manual ? "服务器" : "实例"}设置 · ${inst.name}`;
+  if (manual) {
+    f.m_name.value = inst.name; f.m_ip.value = inst.external_ip || "";
+    f.m_ssh_port.value = inst.ssh_port || 22; f.m_ssh_user.value = inst.ssh_user || "root";
+  }
   $("#inst-dialog").showModal();
 }
 $("#inst-dialog").addEventListener("close", async () => {
   if ($("#inst-dialog").returnValue !== "save" || !editing) return;
   const f = $("#inst-form");
   try {
+    if (editing.provider === "manual") {
+      await api(`/api/servers/${editing.id}`, {
+        method: "PATCH",
+        body: { name: f.m_name.value.trim(), ip: f.m_ip.value.trim(), ssh_port: +f.m_ssh_port.value, ssh_user: f.m_ssh_user.value.trim() || "root" },
+      });
+      await api(`/api/instances/${editing.id}`, {
+        method: "PATCH",
+        body: { auto_ip: f.auto_ip.checked, check_port: +f.check_port.value, note: f.note.value.trim(), grp: f.grp.value.trim() },
+      });
+      toast("已保存");
+      return loadInstances();
+    }
     await api(`/api/instances/${editing.id}`, {
       method: "PATCH",
       body: {
@@ -237,15 +301,29 @@ $("#inst-dialog").addEventListener("close", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
+async function copyText(text, okMsg) {
+  try { await navigator.clipboard.writeText(text); toast(okMsg); }
+  catch (_) { prompt("复制下面的内容：", text); }
+}
+$("#m-bootstrap").addEventListener("click", async (e) => {
+  if (!editing) return;
+  await busy(e.currentTarget, async () => {
+    const r = await api(`/api/servers/${editing.id}/bootstrap-command`, { method: "POST", body: { panel_url: location.origin } });
+    await copyText(r.command, "接入命令已复制，到服务器上用 root 执行一次");
+  });
+});
+
 // ---- 删除实例 ----
 $("#inst-delete").addEventListener("click", async (e) => {
   if (!editing) return;
-  const name = prompt(`删除后实例和启动盘中的数据将无法恢复！\n确认删除请输入实例名称：${editing.name}`);
+  const name = prompt(editing.provider === "manual"
+    ? `从面板移除这台服务器（不会影响服务器本身）。\n确认请输入名称：${editing.name}`
+    : `删除后实例和启动盘中的数据将无法恢复！\n确认删除请输入实例名称：${editing.name}`);
   if (name === null) return;
   if (name.trim() !== editing.name) return toast("名称不匹配，未删除", true);
   await busy(e.currentTarget, async () => {
     await api(`/api/instances/${editing.id}`, { method: "DELETE", body: { confirm_name: name.trim() } });
-    toast(`实例 ${editing.name} 已删除`);
+    toast(editing.provider === "manual" ? `已从面板移除 ${editing.name}` : `实例 ${editing.name} 已删除`);
     $("#inst-dialog").close();
     loadInstances();
   });
@@ -411,7 +489,12 @@ async function openExec(inst) {
   $("#exec-output").classList.add("hidden");
   $("#serial-output").textContent = "点「刷新」查看最近的启动脚本输出";
   setExecRunning(false);
-  switchSub(inst.status === "RUNNING" ? "ssh" : "startup");
+  const manual = inst.provider === "manual";
+  $("#sub-startup-btn").classList.toggle("hidden", manual);
+  $("#exec-note").innerHTML = manual
+    ? `以 ${esc(inst.ssh_user || "root")} 身份通过 SSH（端口 ${inst.ssh_port || 22}）执行 bash 脚本。需要先在服务器上执行过一次「接入命令」（服务器「设置」里复制），或添加时填写了 root 密码。`
+    : `以 root 身份在实例上执行 bash 脚本，实时显示输出。首次执行会自动把面板公钥写入实例（用户 <code>gcpvm</code>），需要防火墙放行 22 端口。`;
+  switchSub(manual || inst.status === "RUNNING" ? "ssh" : "startup");
   $("#exec-dialog").showModal();
   loadPresets();
   // 若该实例已有任务在执行，接上输出
@@ -629,6 +712,31 @@ $("#account-form").addEventListener("submit", async (e) => {
   });
 });
 
+$("#server-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  await busy($("button[type=submit]", f), async () => {
+    const r = await api("/api/servers", {
+      method: "POST",
+      body: {
+        name: f.name.value.trim(), ip: f.ip.value.trim(), ssh_port: +f.ssh_port.value, ssh_user: f.ssh_user.value.trim() || "root",
+        password: f.password.value, grp: f.grp.value.trim(), check_port: +f.check_port.value, auto_ip: f.auto_ip.checked,
+        note: f.note.value.trim(), panel_url: location.origin,
+      },
+    });
+    f.password.value = "";
+    f.reset();
+    if (r.job) {
+      toast(`已添加 ${r.instance.name}，正在用密码接入（写入面板公钥 + 安装上报）…`);
+      switchTab("instances");
+      openExec(r.instance);
+    } else {
+      const c = await api(`/api/servers/${r.instance.id}/bootstrap-command`, { method: "POST", body: { panel_url: location.origin } });
+      await copyText(c.command, `已添加 ${r.instance.name}。接入命令已复制，请到服务器上用 root 执行一次`);
+    }
+  });
+});
+
 // ---------------- settings ----------------
 function probeRow(p = {}) {
   const row = document.createElement("div");
@@ -748,6 +856,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
     detect_mode: f.querySelector("[name=detect_mode]:checked")?.value || "agent",
     control_check: f.control_check.checked,
     status_page_enabled: f.status_page_enabled.checked,
+    service_alert_enabled: f.service_alert_enabled.checked,
+    watch_service: f.watch_service.value.trim(),
+    service_alert_seconds: +f.service_alert_seconds.value || 60,
     status_page_title: f.status_page_title.value.trim(),
     status_page_key: f.status_page_key.value.trim(),
     probes: $$(".probe-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.url),
@@ -783,7 +894,7 @@ $("#probe-test-form").addEventListener("submit", async (e) => {
 });
 
 // ---------------- events ----------------
-const EVT = { create: "新建实例", delete: "删除实例", firewall: "防火墙", exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
+const EVT = { alert: "服务监控", blocked: "被墙", server: "服务器", create: "新建实例", delete: "删除实例", firewall: "防火墙", exec: "执行命令", startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机", check: "检测", dns: "DNS", sync: "同步", account: "账号" };
 async function loadEvents() {
   try {
     const rows = await api("/api/events?limit=300");

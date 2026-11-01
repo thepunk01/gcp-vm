@@ -74,6 +74,10 @@ DEFAULT_SETTINGS: dict = {
     "telegram_chat_id": "",
     # Cloudflare DNS 自动更新
     "cf_api_token": "",
+    # 服务监控：上报中断（失联）或 watch_service 停止超过 service_alert_seconds 秒就通知
+    "service_alert_enabled": True,
+    "service_alert_seconds": 60,
+    "watch_service": "nyanpass",
     # 公开速率页（可用 iframe 嵌入 NY 面板公告）
     "status_page_enabled": False,
     "status_page_key": "",

@@ -20,7 +20,7 @@ def test_rates_and_groups():
     hub.report(1, 10, 10, now=110)
     assert hub.instance_rate(1, now=111)["rx_bps"] == 1_000_000
     # 超过 10 秒未上报视为离线
-    assert hub.instance_rate(1, now=200) == {"online": False, "rx_bps": 0, "tx_bps": 0, "last_seen": 110}
+    assert hub.instance_rate(1, now=200) == {"online": False, "rx_bps": 0, "tx_bps": 0, "last_seen": 110, "svc": ""}
 
     hub.report(2, 0, 0, now=100)
     hub.report(2, 625_000, 0, now=105)  # 1 Mbps

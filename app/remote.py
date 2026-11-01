@@ -65,6 +65,10 @@ class SSHKey:
             ).decode()
             return self._public
 
+    def authorized_keys_line(self) -> str:
+        """写入自有服务器 /root/.ssh/authorized_keys 的一行。"""
+        return f"{self.ensure()} gcpvm-panel"
+
     def metadata_line(self) -> str:
         """GCP 元数据 ssh-keys 中的一行：user:ssh-ed25519 AAAA... user"""
         return f"{self.user}:{self.ensure()} {self.user}"
@@ -111,6 +115,7 @@ def run_ssh(
     timeout: float = 600,
     auth_wait: float = 30,
     cancelled: Callable[[], bool] = lambda: False,
+    password: str | None = None,
 ) -> int:
     """以 root（sudo）在远端执行 bash 脚本，实时回调输出，返回退出码。
 
@@ -118,7 +123,7 @@ def run_ssh(
     """
     import paramiko  # 延迟导入，测试时不需要
 
-    pkey = paramiko.Ed25519Key.from_private_key_file(str(key_path))
+    pkey = None if password else paramiko.Ed25519Key.from_private_key_file(str(key_path))
     deadline_auth = time.time() + max(auth_wait, 0)
     client: paramiko.SSHClient | None = None
     last_err: Exception | None = None
@@ -130,7 +135,7 @@ def run_ssh(
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             client.connect(
-                host, port=port, username=user, pkey=pkey, timeout=15,
+                host, port=port, username=user, pkey=pkey, password=password, timeout=15,
                 banner_timeout=20, auth_timeout=20, allow_agent=False, look_for_keys=False,
             )
             break
@@ -159,7 +164,7 @@ def run_ssh(
         transport.set_keepalive(30)  # type: ignore[union-attr]
         chan = transport.open_session()  # type: ignore[union-attr]
         chan.set_combine_stderr(True)
-        chan.exec_command("sudo -n env DEBIAN_FRONTEND=noninteractive bash -s")
+        chan.exec_command(shell_command(user))
         chan.sendall(script.encode())
         chan.shutdown_write()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -187,6 +192,12 @@ def run_ssh(
         return chan.recv_exit_status()
     finally:
         client.close()
+
+
+def shell_command(user: str) -> str:
+    """root 直接执行（很多精简系统没有 sudo），其他用户通过免密 sudo 提权。"""
+    base = "env DEBIAN_FRONTEND=noninteractive bash -s"
+    return base if user == "root" else f"sudo -n {base}"
 
 
 # ---------------- 启动脚本 ----------------

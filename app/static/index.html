@@ -101,11 +101,26 @@
         </table>
       </div>
       <form class="panel" id="account-form">
-        <h2>添加账号</h2>
+        <h2>添加 GCP 账号</h2>
         <label>名称<input name="name" placeholder="可选，默认使用项目 ID"></label>
         <label>密钥 JSON 文件<input type="file" id="key-file" accept=".json,application/json"></label>
         <label>或粘贴密钥 JSON<textarea name="key" rows="6" placeholder='{"type": "service_account", ...}'></textarea></label>
         <button class="btn primary" type="submit">验证并添加</button>
+      </form>
+
+      <form class="panel grid2" id="server-form">
+        <h2 class="span2">添加自有服务器（非 GCP，如香港 VPS）</h2>
+        <p class="muted small-note span2">支持被墙检测 + TG 通知、实时速率与分组、执行命令、服务监控。没有服务商 API，所以不能自动换 IP / 开关机：被墙时会通知你手动处理。</p>
+        <label>名称<input name="name" required maxlength="40" placeholder="如 香港小鸡1"></label>
+        <label>IP<input name="ip" required placeholder="1.2.3.4"></label>
+        <label>SSH 端口<input name="ssh_port" type="number" value="22" min="1" max="65535"></label>
+        <label>SSH 用户<input name="ssh_user" value="root"></label>
+        <label class="span2">root 密码（可选，只用于首次自动接入，不会保存；不填则添加后复制「接入命令」到服务器上执行）<input name="password" type="password" autocomplete="new-password"></label>
+        <label>分组（速率页显示用，如 香港入口）<input name="grp" maxlength="40"></label>
+        <label>检测端口（实际在用的转发端口）<input name="check_port" type="number" value="22" min="1" max="65535"></label>
+        <label class="check span2"><input type="checkbox" name="auto_ip" checked> 被墙检测并通知</label>
+        <label class="span2">备注<input name="note"></label>
+        <div class="form-actions span2"><button class="btn primary" type="submit">添加服务器</button></div>
       </form>
     </div>
 
@@ -168,6 +183,10 @@
           <label>Telegram Chat ID<input name="telegram_chat_id" autocomplete="off"></label>
           <div class="span2 inline"><button type="button" class="btn small" id="tg-test">发送测试通知</button><span class="muted small-note" style="margin:0">用当前填写的 Token 和 Chat ID 发一条测试消息（无需先保存）</span></div>
           <label class="span2">Cloudflare API Token（需 DNS 编辑权限，换 IP 后自动更新实例绑定的域名）<input name="cf_api_token" autocomplete="off"></label>
+          <h3 class="span2">服务监控（需在实例 / 服务器上安装流量上报）</h3>
+          <label class="check span2"><input type="checkbox" name="service_alert_enabled"> 服务停止或机器失联时发 TG 通知（恢复时也通知）</label>
+          <label>监控的服务名（systemd 服务，如 nyanpass；改了需重新安装上报）<input name="watch_service" placeholder="nyanpass"></label>
+          <label>持续多少秒才通知<input name="service_alert_seconds" type="number" min="20"></label>
         </div>
         <div class="form-actions"><button class="btn primary" type="submit">保存设置</button></div>
       </form>
@@ -200,17 +219,30 @@
 <dialog id="inst-dialog">
   <form id="inst-form" method="dialog">
     <h2 id="inst-dialog-title">实例设置</h2>
-    <label class="check"><input type="checkbox" name="auto_ip"> 被墙自动更换 IP</label>
-    <label class="check"><input type="checkbox" name="auto_start"> 关机/被回收时自动开机</label>
-    <label>检测端口（实例上开放的 TCP 端口，如 SSH 22 或代理端口）<input type="number" name="check_port" min="1" max="65535"></label>
-    <label>IP 类型
-      <select name="ip_mode">
-        <option value="ephemeral">临时 IP（推荐，免费，换 IP 即重新分配）</option>
-        <option value="static">静态 IP（换 IP 时新预留一个并释放旧的）</option>
-      </select>
-    </label>
-    <label>Cloudflare Zone ID<input name="dns_zone_id" placeholder="可选"></label>
-    <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选，如 node1.example.com"></label>
+    <div id="manual-fields" class="hidden">
+      <label>服务器名称<input name="m_name" maxlength="40"></label>
+      <label>IP（在服务商后台换了 IP 后改这里）<input name="m_ip"></label>
+      <div class="grid2">
+        <label>SSH 端口<input name="m_ssh_port" type="number" min="1" max="65535"></label>
+        <label>SSH 用户<input name="m_ssh_user" placeholder="root"></label>
+      </div>
+      <div class="inline" style="margin-bottom:12px"><button type="button" class="btn small" id="m-bootstrap">复制接入命令</button><span class="muted small-note" style="margin:0">在服务器上用 root 执行一次：写入面板公钥 + 安装上报</span></div>
+    </div>
+    <label class="check"><input type="checkbox" name="auto_ip"> <span id="auto-ip-label">被墙自动更换 IP</span></label>
+    <div id="gcp-fields">
+      <label class="check"><input type="checkbox" name="auto_start"> 关机/被回收时自动开机</label>
+    </div>
+    <label>检测端口（实际在用的转发 / 入口端口，如 443；也可填 SSH 22）<input type="number" name="check_port" min="1" max="65535"></label>
+    <div id="gcp-fields-2">
+      <label>IP 类型
+        <select name="ip_mode">
+          <option value="ephemeral">临时 IP（换 IP 即重新分配）</option>
+          <option value="static">静态 IP（推荐，换 IP 更快：预留新地址并释放旧的）</option>
+        </select>
+      </label>
+      <label>Cloudflare Zone ID<input name="dns_zone_id" placeholder="可选"></label>
+      <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选，如 node1.example.com"></label>
+    </div>
     <label>分组（用于公开速率页，如 香港入口；留空则不在速率页显示）<input name="grp" maxlength="40"></label>
     <label>备注<input name="note"></label>
     <div class="form-actions">
@@ -278,11 +310,11 @@
   </div>
   <nav class="subtabs">
     <button type="button" data-sub="ssh" class="active">SSH 执行</button>
-    <button type="button" data-sub="startup">启动脚本</button>
+    <button type="button" data-sub="startup" id="sub-startup-btn">启动脚本</button>
   </nav>
 
   <div id="sub-ssh">
-    <p class="muted small-note">以 root 身份在实例上执行 bash 脚本，实时显示输出。首次执行会自动把面板公钥写入实例（用户 <code>gcpvm</code>），需要防火墙放行 22 端口。</p>
+    <p class="muted small-note" id="exec-note">以 root 身份在实例上执行 bash 脚本，实时显示输出。首次执行会自动把面板公钥写入实例（用户 <code>gcpvm</code>），需要防火墙放行 22 端口。</p>
     <div class="inline preset-row">
       <select id="exec-preset"><option value="">— 常用脚本 —</option></select>
       <button type="button" class="btn small" id="preset-save">存为常用</button>

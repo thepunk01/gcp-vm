@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import re
 import json
@@ -15,7 +16,7 @@ import jwt
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -106,8 +107,16 @@ def create_app(
             raise HTTPException(400, "参数错误") from None
 
     # ---- public ----
+    def asset_version(name: str) -> str:
+        return hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+
+    # 给 app.js / app.css 加上内容哈希，避免浏览器或 Cloudflare 缓存旧版本
+    index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.js", "app.css"):
+        index_html = index_html.replace(f"/static/{asset}\"", f"/static/{asset}?v={asset_version(asset)}\"")
+
     async def index(_: Request):
-        return FileResponse(STATIC_DIR / "index.html")
+        return HTMLResponse(index_html, headers={"Cache-Control": "no-cache"})
 
     async def probe_file(request: Request):
         # 供探针设备直接从面板下载（国内访问 GitHub 不稳定）

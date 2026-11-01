@@ -178,3 +178,8 @@ def test_telegram_test_endpoint(client, monkeypatch):
     assert r.status_code == 400 and "Chat ID" in r.json()["message"]
     monkeypatch.setattr(integrations.requests, "post", lambda *a, **k: R({"ok": True}))
     assert client.post("/api/telegram-test", json={"telegram_bot_token": "1:x", "telegram_chat_id": "1"}, headers=h).json()["ok"]
+
+
+def test_index_busts_asset_cache(client):
+    html = client.get("/").text
+    assert "/static/app.js?v=" in html and "/static/app.css?v=" in html

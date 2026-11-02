@@ -855,6 +855,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   const body = {
     detect_mode: f.querySelector("[name=detect_mode]:checked")?.value || "agent",
     control_check: f.control_check.checked,
+    verify_new_ip: f.verify_new_ip.checked,
     status_page_enabled: f.status_page_enabled.checked,
     service_alert_enabled: f.service_alert_enabled.checked,
     watch_service: f.watch_service.value.trim(),

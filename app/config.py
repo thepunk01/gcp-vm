@@ -65,6 +65,8 @@ DEFAULT_SETTINGS: dict = {
     "tcp_tries": 3,
     # 对照检测：本机（海外）也能连通才判定为被墙，否则视为实例/服务故障
     "control_check": True,
+    # 换 IP 时先用国内探针验证新 IP 可达，被墙则继续换下一个
+    "verify_new_ip": True,
     # 两次自动换 IP 之间的最短间隔（分钟）
     "cooldown_minutes": 30,
     # 每个实例每天最多自动换 IP 次数

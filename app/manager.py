@@ -171,12 +171,13 @@ class Manager:
         avoid = self.db.recent_blocked_ips()
         if old_ip:
             avoid.add(old_ip)
+        verify, vinfo = self._make_verifier(inst)
 
         try:
             if inst["ip_mode"] == "static":
-                new_ip = self._swap_static(client, inst, live, region, ac_name, tier, avoid)
+                new_ip = self._swap_static(client, inst, live, region, ac_name, tier, avoid, verify)
             else:
-                new_ip = self._swap_ephemeral(client, inst, live, ac_name, tier, avoid)
+                new_ip = self._swap_ephemeral(client, inst, live, ac_name, tier, avoid, verify)
         except GCPError as e:
             self._event(inst, "change_ip", f"更换 IP 失败（{reason}）：{e}", "error", notify=True)
             # 尽力恢复：若外网 IP 已被删除，补一个临时 IP，避免实例失联
@@ -190,14 +191,52 @@ class Manager:
             raise ManagerError(str(e)) from e
 
         inst = self.db.update_instance(
-            inst["id"], last_change_at=time.time(), fail_count=0, cn_state=STATE_UNKNOWN
+            inst["id"], last_change_at=time.time(), fail_count=0,
+            cn_state=STATE_OK if vinfo["verified"] else STATE_UNKNOWN,
         )
         inst = self._refresh(inst, client)
+        note = ""
+        if vinfo["verified"]:
+            note = "，已验证国内可达" + (f"（跳过 {vinfo['rejected']} 个被墙的新 IP）" if vinfo["rejected"] else "")
+        elif vinfo["skipped"]:
+            note = f"，未验证（{vinfo['skipped']}）"
         self._event(
-            inst, "change_ip", f"IP 已更换（{reason}）：{old_ip or '-'} -> {new_ip}", "warn", notify=True
+            inst, "change_ip", f"IP 已更换（{reason}）：{old_ip or '-'} -> {new_ip}{note}", "warn", notify=True
         )
         self._update_dns(inst, new_ip)
         return inst
+
+    def _make_verifier(self, inst: dict):
+        """生成“新 IP 国内可达性”验证函数：返回 (是否接受, 说明)。
+
+        只有探针明确判定为被墙才拒绝；探针不可用 / 服务暂时不通时接受（无法验证），避免卡住。
+        """
+        settings = self.db.get_settings()
+        vinfo = {"verified": False, "rejected": 0, "skipped": ""}
+        if not settings.get("verify_new_ip", True):
+            return None, vinfo
+        port = int(inst.get("check_port") or 22)
+
+        def verify(ip: str) -> tuple[bool, str]:
+            res = self.checker_cls(settings).check(ip, port)
+            if res.state == STATE_DOWN:  # 刚绑定，服务可能还没在新 IP 上响应，稍等再测一次
+                self._sleep(5)
+                res = self.checker_cls(settings).check(ip, port)
+            if res.state == STATE_BLOCKED:
+                vinfo["rejected"] += 1
+                return False, res.detail
+            if res.state == STATE_OK:
+                vinfo["verified"] = True
+                vinfo["skipped"] = ""
+            else:
+                vinfo["skipped"] = res.detail or "探针不可用"
+            return True, res.detail
+
+        return verify, vinfo
+
+    def _reject_candidate(self, inst: dict, ip: str, detail: str, n: int) -> None:
+        self.db.add_blocked_ip(ip, inst["id"])
+        self._event(inst, "change_ip", f"新 IP {ip} 验证未通过（{detail}），已记为被墙，继续更换（第 {n} 个）", "warn")
 
     def _cleanup_leftover_addresses(self, client, inst: dict, region: str) -> None:
         """释放本系统创建、但已不再使用的静态地址（换 IP 被中断时可能残留），避免占满配额、产生费用。"""
@@ -216,7 +255,7 @@ class Manager:
             except GCPError as e:
                 log.warning("[%s] 释放残留地址 %s 失败：%s", inst["name"], a["name"], e)
 
-    def _swap_ephemeral(self, client, inst, live, ac_name, tier, avoid: set[str]) -> str:
+    def _swap_ephemeral(self, client, inst, live, ac_name, tier, avoid: set[str], verify=None) -> str:
         """释放旧临时 IP 并重新分配，直到拿到不在规避列表里的 IP。
 
         GCP 常把刚释放的临时 IP 立刻分回来（包括别的实例刚因被墙释放的 IP）。
@@ -251,7 +290,14 @@ class Manager:
                 client.add_access_config(zone, name, live["nic_name"], ac_name, None, tier)
                 new_ip = client.get_instance(zone, name)["external_ip"]
                 if new_ip and new_ip not in avoid:
-                    return new_ip
+                    if verify is None:
+                        return new_ip
+                    ok, detail = verify(new_ip)
+                    if ok:
+                        return new_ip
+                    avoid.add(new_ip)
+                    self._reject_candidate(inst, new_ip, detail, attempt)
+                    continue
                 log.info("[%s] 第 %d 次分配到的 IP %s 在规避列表中，重新分配", name, attempt, new_ip or "-")
             if not new_ip:
                 raise GCPError("未能分配到新的外网 IP")
@@ -269,43 +315,62 @@ class Manager:
                 except GCPError as e:
                     self._event(inst, "change_ip", f"释放占位地址 {hold} 失败：{e}，请到 GCP 控制台手动释放以免计费", "warn")
 
-    def _swap_static(self, client, inst, live, region, ac_name, tier, avoid: set[str]) -> str:
-        """预留新的静态 IP 并绑定。预留到已知被墙的 IP 时先保留（占住）它、继续预留下一个，
-        拿到可用 IP 后再统一释放这些被拒绝的地址，保证不会换回被墙 IP。"""
+    def _swap_static(self, client, inst, live, region, ac_name, tier, avoid: set[str], verify=None) -> str:
+        """预留新的静态 IP 并绑定。
+
+        - 预留到已知被墙的 IP：保留（占住）它，继续预留下一个；
+        - 开启验证时：绑定后用国内探针检测，被墙就记入名单、保留占住，继续换下一个；
+        - 拿到可用 IP 后统一释放这些被拒绝的地址，保证不会换回被墙 IP。
+        """
+        zone, iname = inst["zone"], inst["name"]
         old_ip = live["external_ip"]
         old_addr = client.find_address_by_ip(region, old_ip) if old_ip else None
         base = (
-            f"{STATIC_PREFIX}{inst['name']}"[:40].rstrip("-")
+            f"{STATIC_PREFIX}{iname}"[:40].rstrip("-")
             + "-" + datetime.now().strftime("%m%d%H%M%S") + secrets.token_hex(2)
         )
         rejected: list[str] = []
-        new_ip, addr_name = "", ""
+        attached = ""  # 当前绑定在实例上的（本次新预留的）地址名
+        new_ip = ""
         try:
             for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
                 name = f"{base}-{attempt}"
                 ip = client.reserve_address(region, name, tier)
-                if ip and ip not in avoid:
-                    new_ip, addr_name = ip, name
+                if not ip or ip in avoid:
+                    log.info("[%s] 第 %d 次预留到的静态 IP %s 在规避列表中，先占住并重新预留", iname, attempt, ip)
+                    rejected.append(name)
+                    continue
+                try:
+                    cur = client.get_instance(zone, iname)
+                    if cur["access_config_name"]:
+                        client.delete_access_config(zone, iname, cur["nic_name"], cur["access_config_name"])
+                    client.add_access_config(zone, iname, live["nic_name"], ac_name, ip, tier)
+                except GCPError:
+                    try:
+                        client.release_address(region, name)
+                    except GCPError:
+                        pass
+                    raise
+                attached = name
+                if verify is None:
+                    new_ip = ip
                     break
-                log.info("[%s] 第 %d 次预留到的静态 IP %s 在规避列表中，先占住并重新预留", inst["name"], attempt, ip)
+                ok, detail = verify(ip)
+                if ok:
+                    new_ip = ip
+                    break
+                avoid.add(ip)
+                self._reject_candidate(inst, ip, detail, attempt)
                 rejected.append(name)
             if not new_ip:
                 raise GCPError(
-                    f"连续 {MAX_EPHEMERAL_TRIES} 次预留到的静态 IP 都是已知被墙的 IP，本次放弃；"
-                    "下一轮检测会继续尝试，若持续如此，建议切换网络层级或换区域"
+                    f"连续 {MAX_EPHEMERAL_TRIES} 个新静态 IP 都是被墙的（已知被墙或验证国内不可达），本次放弃；"
+                    "下一轮检测会继续尝试，若持续如此，建议换区域"
                 )
-            try:
-                if live["access_config_name"]:
-                    client.delete_access_config(inst["zone"], inst["name"], live["nic_name"], live["access_config_name"])
-                client.add_access_config(inst["zone"], inst["name"], live["nic_name"], ac_name, new_ip, tier)
-            except GCPError:
-                try:
-                    client.release_address(region, addr_name)
-                except GCPError:
-                    pass
-                raise
         finally:
             for name in rejected:
+                if name == attached:
+                    continue  # 正绑定在实例上的不能释放，下次换 IP 时会作为旧地址释放
                 try:
                     client.release_address(region, name)
                 except GCPError as e:

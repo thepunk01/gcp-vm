@@ -20,6 +20,7 @@ def make_checker(state):
 @pytest.fixture
 def env(db, fake_gcp):
     state = ["blocked"]
+    db.update_settings({"verify_new_ip": False})  # 这里的假探针对任何 IP 都返回被墙，验证另有专门测试
     mgr = Manager(db, FakePool(fake_gcp), checker_cls=make_checker(state))
     acc = db.add_account("a1", FAKE_KEY)
     mgr.sync_account(acc["id"])
@@ -254,3 +255,59 @@ def test_change_ip_cleans_leftover_reserved_addresses(db, fake_gcp):
     mgr.change_ip(ids["vm1"], reason="自动-被墙")
     assert "gcpvm-vm1-old-1" not in fake_gcp.addresses and "my-own-ip" in fake_gcp.addresses
     assert any("残留" in e["message"] for e in db.list_events())
+
+
+# ---------------- 先验证再接受 ----------------
+def _checker_blocking(blocked_ips):
+    from app.checker import CheckResult, STATE_BLOCKED, STATE_OK
+
+    class C:
+        def __init__(self, settings):
+            pass
+
+        def check(self, host, port):
+            if host in blocked_ips:
+                return CheckResult(STATE_BLOCKED, detail="国内可达率 0%，疑似被墙")
+            return CheckResult(STATE_OK, detail="国内可达率 100%")
+    return C
+
+
+def test_static_verify_skips_preblocked_candidates(db, fake_gcp):
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    db.update_instance_config(ids["vm1"], {"ip_mode": "static"})
+    # 地址池接下来给出的前两个新 IP 在国内已被墙（别人用过的）
+    mgr.checker_cls = _checker_blocking({"35.1.0.1", "35.1.0.2"})
+    inst = mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    assert inst["external_ip"] == "35.1.0.3" and inst["cn_state"] == "ok"
+    assert {"35.1.0.1", "35.1.0.2"} <= db.recent_blocked_ips()
+    # 被拒绝的候选地址已释放，只剩 vm1 正在用的
+    assert [a["address"] for a in fake_gcp.addresses.values()] == ["35.1.0.3"]
+    msg = [e["message"] for e in db.list_events() if "IP 已更换" in e["message"]][0]
+    assert "已验证国内可达" in msg and "跳过 2 个" in msg
+
+
+def test_static_verify_all_blocked_keeps_instance_reachable(db, fake_gcp):
+    from app.manager import ManagerError
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    db.update_instance_config(ids["vm1"], {"ip_mode": "static"})
+    mgr.checker_cls = _checker_blocking({f"35.1.0.{i}" for i in range(1, 50)})
+    with pytest.raises(ManagerError, match="都是被墙的"):
+        mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    cur = fake_gcp.get_instance("asia-east1-b", "vm1")["external_ip"]
+    assert cur  # 实例仍绑定着最后一个候选 IP，没有被释放成无 IP
+    assert [a["address"] for a in fake_gcp.addresses.values()] == [cur]
+
+
+def test_ephemeral_verify_skips_preblocked(db, fake_gcp):
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    mgr.checker_cls = _checker_blocking({"35.1.0.1"})
+    inst = mgr.change_ip(ids["vm1"], reason="自动-被墙")
+    assert inst["external_ip"] == "35.1.0.2" and "35.1.0.1" in db.recent_blocked_ips()
+    assert fake_gcp.addresses == {}
+
+
+def test_verify_can_be_disabled(db, fake_gcp):
+    mgr, ids = _mgr_two_vms(db, fake_gcp)
+    db.update_settings({"verify_new_ip": False})
+    mgr.checker_cls = _checker_blocking({"35.1.0.1"})
+    assert mgr.change_ip(ids["vm1"], reason="自动-被墙")["external_ip"] == "35.1.0.1"

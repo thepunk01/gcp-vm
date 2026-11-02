@@ -155,6 +155,7 @@
           <label>每次检测重试次数<input type="number" name="tcp_tries" min="1" max="5"></label>
           <label>国内可达率阈值（0-1）<input type="number" name="cn_success_ratio" step="0.1" min="0" max="1"></label>
           <label class="check"><input type="checkbox" name="control_check"> 海外对照检测（海外也不通时不换 IP）</label>
+          <label class="check span2"><input type="checkbox" name="verify_new_ip"> 换 IP 时先用国内探针验证新 IP，被墙就继续换下一个（推荐配合「静态 IP」模式，每个候选约多花 20-45 秒）</label>
           <label>换 IP 冷却时间（分钟）<input type="number" name="cooldown_minutes" min="0"></label>
           <label>每天最多自动换 IP 次数<input type="number" name="max_changes_per_day" min="0"></label>
         </div>

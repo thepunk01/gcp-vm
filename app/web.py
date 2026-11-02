@@ -523,6 +523,8 @@ def create_app(
             data["service_alert_seconds"] = int(data["service_alert_seconds"])
             if data["service_alert_seconds"] < 20:
                 raise ValueError("服务监控判定时间不能小于 20 秒")
+        if "verify_new_ip" in data:
+            data["verify_new_ip"] = bool(data["verify_new_ip"])
         if "service_alert_enabled" in data:
             data["service_alert_enabled"] = bool(data["service_alert_enabled"])
         if "watch_service" in data:

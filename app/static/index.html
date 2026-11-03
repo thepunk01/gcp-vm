@@ -1,268 +1,433 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GCP VM 管理</title>
+<meta name="robots" content="noindex">
+<title>AtomicGCP 控制台</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 
+<!-- 图标与品牌标识 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-mark" viewBox="0 0 120 120">
+      <g fill="none" stroke-width="7" stroke-linecap="round">
+        <ellipse cx="60" cy="60" rx="52" ry="18" transform="rotate(60 60 60)" stroke="currentColor"/>
+        <ellipse cx="60" cy="60" rx="52" ry="18" transform="rotate(120 60 60)" stroke="currentColor"/>
+        <path d="M14.09 51.55 A52 18 0 1 1 11.13 66.16" stroke="var(--accent)"/>
+      </g>
+      <polygon points="2.6,59.4 18.4,62.7 6.6,74.6" fill="var(--accent)"/>
+      <circle cx="60" cy="60" r="11" fill="var(--accent)"/>
+    </symbol>
+    <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3M10 17l5-5-5-5M15 12H4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/></symbol>
+    <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12l6-6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4M12 17h.01"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></symbol>
+  </defs>
+</svg>
+
 <!-- 登录 -->
 <section id="login-view" class="login hidden">
   <form id="login-form" class="login-card">
-    <div class="brand"><span class="dot"></span>GCP VM 管理</div>
-    <p class="muted">实例管理 · IP 被墙自动更换</p>
+    <svg class="login-mark" aria-hidden="true"><use href="#i-mark"/></svg>
+    <h1>Atomic<span class="accent">GCP</span></h1>
+    <p class="muted">实例管理 · 被墙检测与自动换 IP · 实时速率</p>
+    <label class="sr-only" for="login-password">管理密码</label>
     <input id="login-password" type="password" placeholder="管理密码" autocomplete="current-password" required>
-    <button class="btn primary" type="submit">登录</button>
-    <p id="login-error" class="error"></p>
+    <button class="btn primary block" type="submit">登录</button>
+    <p id="login-error" class="error" role="alert"></p>
   </form>
 </section>
 
 <!-- 主界面 -->
-<section id="main-view" class="hidden">
-  <header class="topbar">
-    <div class="brand"><span class="dot"></span>GCP VM 管理</div>
-    <nav class="tabs">
-      <button data-tab="instances" class="active">实例</button>
-      <button data-tab="firewall">防火墙</button>
-      <button data-tab="accounts">账号</button>
-      <button data-tab="settings">检测设置</button>
-      <button data-tab="events">事件日志</button>
-    </nav>
-    <button id="logout" class="btn ghost small">退出</button>
-  </header>
-
-  <main>
-    <!-- 实例 -->
-    <div id="tab-instances" class="tab">
-      <div class="toolbar">
-        <div class="stats" id="stats"></div>
-        <div class="toolbar-actions">
-          <button class="btn" id="btn-run-check">立即检测一轮</button>
-          <button class="btn" id="btn-sync">从 GCP 同步</button>
-          <button class="btn primary" id="btn-create">+ 新建实例</button>
-        </div>
-      </div>
-      <div id="instances" class="cards"></div>
+<div id="app" class="app hidden">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <svg class="brand-mark" aria-hidden="true"><use href="#i-mark"/></svg>
+      <div><div class="brand-name">Atomic<span class="accent">GCP</span></div><div class="brand-sub">控制台</div></div>
     </div>
+    <nav class="nav" aria-label="主导航">
+      <a href="#/overview" data-view="overview"><svg aria-hidden="true"><use href="#i-overview"/></svg>总览</a>
+      <a href="#/instances" data-view="instances"><svg aria-hidden="true"><use href="#i-server"/></svg>实例<span class="nav-badge hidden" id="nav-alerts"></span></a>
+      <a href="#/firewall" data-view="firewall"><svg aria-hidden="true"><use href="#i-shield"/></svg>防火墙</a>
+      <a href="#/accounts" data-view="accounts"><svg aria-hidden="true"><use href="#i-key"/></svg>账号与服务器</a>
+      <a href="#/settings" data-view="settings"><svg aria-hidden="true"><use href="#i-sliders"/></svg>设置</a>
+      <a href="#/events" data-view="events"><svg aria-hidden="true"><use href="#i-list"/></svg>事件日志</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="probe-pill" id="probe-pill" title="国内探针状态"><i></i><span>探针</span></div>
+      <div class="foot-actions">
+        <button class="icon-btn" id="theme-toggle" type="button" aria-label="切换深色 / 浅色"><svg aria-hidden="true"><use href="#i-sun"/></svg></button>
+        <button class="icon-btn" id="logout" type="button" aria-label="退出登录"><svg aria-hidden="true"><use href="#i-logout"/></svg></button>
+      </div>
+    </div>
+  </aside>
+  <div class="scrim hidden" id="scrim"></div>
 
-    <!-- 防火墙 -->
-    <div id="tab-firewall" class="tab hidden">
-      <div class="panel">
-        <div class="toolbar">
-          <h2>防火墙规则</h2>
-          <div class="toolbar-actions">
-            <select id="fw-account" class="fw-account"></select>
-            <button class="btn small" id="fw-refresh">刷新</button>
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menu-btn" type="button" aria-label="打开菜单"><svg aria-hidden="true"><use href="#i-menu"/></svg></button>
+      <h1 id="view-title">总览</h1>
+      <div class="topbar-actions" id="topbar-actions"></div>
+    </header>
+
+    <main class="content">
+      <!-- 总览 -->
+      <section class="view" id="view-overview">
+        <div class="kpis">
+          <div class="kpi"><div class="kpi-k"><b class="dot rx"></b>总下行</div><div class="kpi-v"><span id="k-rx">0</span><small id="k-rx-u">bps</small></div></div>
+          <div class="kpi"><div class="kpi-k"><b class="dot tx"></b>总上行</div><div class="kpi-v"><span id="k-tx">0</span><small id="k-tx-u">bps</small></div></div>
+          <div class="kpi"><div class="kpi-k"><b class="dot ok"></b>运行 / 在线</div><div class="kpi-v"><span id="k-run">0</span><small id="k-total">/ 0</small></div></div>
+          <div class="kpi"><div class="kpi-k"><b class="dot bad"></b>异常</div><div class="kpi-v"><span id="k-bad">0</span><small>台</small></div></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h2>实时速率</h2><span class="muted small">最近 3 分钟 · 全部实例合计</span></div>
+            <svg class="big-chart" id="ov-chart" viewBox="0 0 600 160" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <div class="legend"><span class="l-rx">下行</span><span class="l-tx">上行</span></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>需要处理</h2><span class="muted small" id="ov-issue-count"></span></div>
+            <ul class="issues" id="ov-issues"></ul>
           </div>
         </div>
-        <p class="muted small-note">规则作用于该项目整个 VPC 网络。GCP 默认只放行 SSH 22、RDP 3389 和 ICMP，其余端口需要在这里放行。删除 <code>default-allow-ssh</code> 会导致面板「SSH 执行」无法连接。</p>
-        <div class="table-wrap">
-          <table class="table" id="fw-table">
-            <thead><tr><th>名称</th><th>网络</th><th>方向</th><th>动作</th><th>协议 / 端口</th><th>来源 / 目标 IP</th><th>作用于</th><th>优先级</th><th></th></tr></thead>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h2>分组</h2><a class="link" href="#/settings/status">公开速率页 <svg aria-hidden="true"><use href="#i-chevron"/></svg></a></div>
+            <div id="ov-groups" class="groups"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>最近事件</h2><a class="link" href="#/events">全部 <svg aria-hidden="true"><use href="#i-chevron"/></svg></a></div>
+            <ul class="feed" id="ov-events"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- 实例 -->
+      <section class="view hidden" id="view-instances">
+        <div class="toolbar">
+          <div class="seg" id="inst-filter" role="tablist">
+            <button type="button" data-f="all" class="on">全部</button>
+            <button type="button" data-f="gcp">GCP</button>
+            <button type="button" data-f="manual">自有</button>
+            <button type="button" data-f="issue">异常</button>
+          </div>
+          <input type="search" id="inst-search" class="search" placeholder="搜索名称 / IP / 分组" aria-label="搜索实例">
+        </div>
+        <div class="table-card">
+          <table class="tbl" id="inst-table">
+            <thead><tr><th>实例</th><th>外网 IP</th><th>状态</th><th>国内</th><th>实时速率</th><th>分组</th><th class="r">操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty hidden" id="inst-empty"></div>
+        </div>
+      </section>
+
+      <!-- 防火墙 -->
+      <section class="view hidden" id="view-firewall">
+        <div class="toolbar">
+          <label class="inline-label">项目 <select id="fw-account"></select></label>
+          <button class="btn small" id="fw-refresh" type="button"><svg aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+        </div>
+        <p class="muted small">规则作用于项目的整个 VPC 网络。GCP 默认只放行 SSH 22、RDP 3389 和 ICMP。删除 <code>default-allow-ssh</code> 会导致「执行命令」无法连接 GCP 实例。</p>
+        <div class="table-card">
+          <table class="tbl" id="fw-table">
+            <thead><tr><th>名称</th><th>方向</th><th>动作</th><th>协议 / 端口</th><th>来源 / 目标</th><th>作用于</th><th>优先级</th><th class="r"></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
-      </div>
-      <form class="panel grid2" id="fw-form">
-        <h2 class="span2">新建规则</h2>
-        <div class="span2 inline quick-row">
-          <span class="muted">快捷：</span>
-          <button type="button" class="btn small" data-quick="all">放行全部端口</button>
-          <button type="button" class="btn small" data-quick="web">放行 80 / 443</button>
-          <button type="button" class="btn small" data-quick="proxy">放行 TCP+UDP 全端口</button>
+        <form class="card form-grid" id="fw-form">
+          <div class="card-head span2"><h2>新建规则</h2>
+            <div class="chips">
+              <button type="button" class="chip" data-quick="all">放行全部端口</button>
+              <button type="button" class="chip" data-quick="web">放行 80 / 443</button>
+              <button type="button" class="chip" data-quick="proxy">放行 TCP+UDP 全端口</button>
+            </div>
+          </div>
+          <label>名称<input name="name" required pattern="[a-z]([a-z0-9\-]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头" placeholder="allow-proxy"></label>
+          <label>网络<select name="network"></select></label>
+          <label>方向<select name="direction"><option value="INGRESS">入站（外部访问实例）</option><option value="EGRESS">出站（实例访问外部）</option></select></label>
+          <label>动作<select name="action"><option value="allow">允许</option><option value="deny">拒绝</option></select></label>
+          <label class="span2">协议和端口<input name="rules" required placeholder="all　或　tcp:443,8443,10000-20000 udp:443　或　icmp"></label>
+          <label>来源 IP 范围（出站时为目标）<input name="ranges" value="0.0.0.0/0"></label>
+          <label>优先级（0-65535，越小越优先）<input name="priority" type="number" value="1000" min="0" max="65535"></label>
+          <label>目标网络标记（留空作用于所有实例）<input name="target_tags" placeholder="可选"></label>
+          <label>说明<input name="description" placeholder="可选"></label>
+          <div class="form-actions span2"><button class="btn primary" type="submit">创建规则</button></div>
+        </form>
+      </section>
+
+      <!-- 账号与服务器 -->
+      <section class="view hidden" id="view-accounts">
+        <div class="card">
+          <div class="card-head"><h2>GCP 服务账号</h2></div>
+          <p class="muted small">在 GCP 控制台 → IAM → 服务账号中创建 JSON 密钥。角色：<code>Compute Admin</code>；使用「执行命令」还需要 <code>Service Account User</code>。</p>
+          <div class="table-card flat">
+            <table class="tbl" id="accounts-table"><thead><tr><th>名称</th><th>项目</th><th>服务账号</th><th class="r"></th></tr></thead><tbody></tbody></table>
+          </div>
         </div>
-        <label>名称<input name="name" placeholder="如 allow-proxy" required pattern="[a-z]([a-z0-9\-]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头"></label>
-        <label>网络<select name="network"></select></label>
-        <label>方向
-          <select name="direction"><option value="INGRESS">入站（外部访问实例）</option><option value="EGRESS">出站（实例访问外部）</option></select>
-        </label>
-        <label>动作
-          <select name="action"><option value="allow">允许</option><option value="deny">拒绝</option></select>
-        </label>
-        <label class="span2">协议和端口<input name="rules" placeholder="all  或  tcp:443,8443,10000-20000 udp:443  或  icmp" required></label>
-        <label>来源 IP 范围（出站时为目标）<input name="ranges" value="0.0.0.0/0"></label>
-        <label>优先级（0-65535，越小越优先）<input name="priority" type="number" value="1000" min="0" max="65535"></label>
-        <label>目标网络标记（可选，留空作用于所有实例）<input name="target_tags" placeholder="如 proxy-server"></label>
-        <label>说明（可选）<input name="description"></label>
-        <div class="form-actions span2"><button class="btn primary" type="submit">创建规则</button></div>
-      </form>
+        <div class="grid-2 align-start">
+          <form class="card" id="account-form">
+            <div class="card-head"><h2>添加 GCP 账号</h2></div>
+            <label>名称<input name="name" placeholder="可选，默认使用项目 ID"></label>
+            <label>密钥 JSON 文件<input type="file" id="key-file" accept=".json,application/json"></label>
+            <label>或粘贴密钥 JSON<textarea name="key" rows="5" placeholder='{"type": "service_account", ...}'></textarea></label>
+            <div class="form-actions"><button class="btn primary" type="submit">验证并添加</button></div>
+          </form>
+          <form class="card form-grid" id="server-form">
+            <div class="card-head span2"><h2>添加自有服务器</h2><span class="muted small">非 GCP，如香港 VPS</span></div>
+            <p class="muted small span2">支持被墙检测 + TG 通知、实时速率与分组、执行命令、服务监控。没有服务商 API，不能自动换 IP / 开关机。</p>
+            <label>名称<input name="name" required maxlength="40" placeholder="香港小鸡1"></label>
+            <label>IP<input name="ip" required placeholder="1.2.3.4"></label>
+            <label>SSH 端口<input name="ssh_port" type="number" value="22" min="1" max="65535"></label>
+            <label>SSH 用户<input name="ssh_user" value="root"></label>
+            <label class="span2">root 密码（可选，只用于首次自动接入，不保存）<input name="password" type="password" autocomplete="new-password" placeholder="不填则添加后复制「接入命令」到服务器执行"></label>
+            <label>分组<input name="grp" maxlength="40" placeholder="香港入口"></label>
+            <label>检测端口（实际转发端口）<input name="check_port" type="number" value="22" min="1" max="65535"></label>
+            <label class="check span2"><input type="checkbox" name="auto_ip" checked> 被墙检测并通知</label>
+            <label class="span2">备注<input name="note"></label>
+            <div class="form-actions span2"><button class="btn primary" type="submit">添加服务器</button></div>
+          </form>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="view hidden" id="view-settings">
+        <div class="settings-layout">
+          <nav class="subnav" id="settings-nav" aria-label="设置分组">
+            <a href="#/settings/detect" data-sec="detect">检测与换 IP</a>
+            <a href="#/settings/probes" data-sec="probes">国内探针</a>
+            <a href="#/settings/notify" data-sec="notify">通知与 DNS</a>
+            <a href="#/settings/monitor" data-sec="monitor">服务监控</a>
+            <a href="#/settings/status" data-sec="status">公开速率页</a>
+          </nav>
+          <form id="settings-form" class="settings-body">
+            <div class="card form-grid sec" data-sec="detect">
+              <div class="card-head span2"><h2>检测与换 IP</h2></div>
+              <label>检测间隔（秒）<input type="number" name="check_interval" min="30"></label>
+              <label>连续被墙次数阈值<input type="number" name="fail_threshold" min="1"></label>
+              <label>换 IP 冷却时间（分钟）<input type="number" name="cooldown_minutes" min="0"></label>
+              <label>每天最多自动换 IP 次数<input type="number" name="max_changes_per_day" min="0"></label>
+              <label>TCP 超时（秒）<input type="number" name="tcp_timeout" step="0.5" min="1"></label>
+              <label>每次检测重试次数<input type="number" name="tcp_tries" min="1" max="5"></label>
+              <label>国内可达率阈值（0-1）<input type="number" name="cn_success_ratio" step="0.1" min="0" max="1"></label>
+              <span></span>
+              <label class="check span2"><input type="checkbox" name="control_check"> 海外对照检测：海外也不通时判定为服务故障，不换 IP</label>
+              <label class="check span2"><input type="checkbox" name="verify_new_ip"> 换 IP 时先验证新 IP：用国内探针检测，被墙就继续换下一个（推荐配合静态 IP 模式）</label>
+            </div>
+
+            <div class="card sec" data-sec="probes">
+              <div class="card-head"><h2>国内探针</h2></div>
+              <div class="radio-row">
+                <label class="radio"><input type="radio" name="detect_mode" value="agent"> 国内探针（本系统部署在海外时）</label>
+                <label class="radio"><input type="radio" name="detect_mode" value="local"> 本机直接检测（本系统部署在国内时）</label>
+              </div>
+              <div id="probes-block">
+                <h3>主动上报探针 <span class="muted small">推荐，探针设备不需要公网 IP</span></h3>
+                <p class="muted small">家里的路由器（OpenWrt / iStoreOS）、NAS、树莓派等。添加后点「安装命令」获取部署方法，然后保存设置。</p>
+                <div id="push-probes" class="rows"></div>
+                <button type="button" class="btn small" id="add-push-probe"><svg aria-hidden="true"><use href="#i-plus"/></svg>添加主动上报探针</button>
+                <pre id="push-install" class="code hidden"></pre>
+                <h3>监听模式探针 <span class="muted small">探针需要公网 IP</span></h3>
+                <div id="probes" class="rows"></div>
+                <button type="button" class="btn small" id="add-probe"><svg aria-hidden="true"><use href="#i-plus"/></svg>添加探针</button>
+              </div>
+            </div>
+
+            <div class="card form-grid sec" data-sec="notify">
+              <div class="card-head span2"><h2>通知与 DNS</h2></div>
+              <label>Telegram Bot Token<input name="telegram_bot_token" autocomplete="off"></label>
+              <label>Telegram Chat ID<input name="telegram_chat_id" autocomplete="off"></label>
+              <div class="span2 inline"><button type="button" class="btn small" id="tg-test">发送测试通知</button><span class="muted small">用当前填写的内容测试，无需先保存</span></div>
+              <label class="span2">Cloudflare API Token（DNS 编辑权限，换 IP 后自动更新实例绑定的域名）<input name="cf_api_token" autocomplete="off"></label>
+            </div>
+
+            <div class="card form-grid sec" data-sec="monitor">
+              <div class="card-head span2"><h2>服务监控</h2></div>
+              <p class="muted small span2">需要在实例 / 服务器上安装流量上报。服务停止或机器失联超过设定时间通知一次，恢复时再通知。</p>
+              <label class="check span2"><input type="checkbox" name="service_alert_enabled"> 开启服务监控通知</label>
+              <label>监控的 systemd 服务（改了需重新安装上报）<input name="watch_service" placeholder="nyanpass"></label>
+              <label>持续多少秒才通知<input name="service_alert_seconds" type="number" min="20"></label>
+            </div>
+
+            <div class="card form-grid sec" data-sec="status" id="status-panel">
+              <div class="card-head span2"><h2>公开速率页</h2><a id="status-open" class="link" target="_blank" rel="noopener">预览 <svg aria-hidden="true"><use href="#i-chevron"/></svg></a></div>
+              <p class="muted small span2">按「分组」汇总实时速率，不显示 IP 和实例名，可用 iframe 嵌入 NY 面板「站点公告」。NY 是 HTTPS 时本面板也要用 HTTPS 访问。</p>
+              <label class="check span2"><input type="checkbox" name="status_page_enabled"> 开启公开速率页</label>
+              <label>标题<input name="status_page_title" maxlength="40"></label>
+              <label>访问密钥
+                <span class="inline"><input name="status_page_key" class="mono" autocomplete="off" spellcheck="false"><button type="button" class="btn small" id="status-key-gen">重新生成</button></span>
+              </label>
+              <label>主题<select id="status-theme"><option value="dark">深色（品牌色）</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></label>
+              <label>嵌入高度（px，按分组数估算）<input id="status-height" type="number" value="260" min="120" max="3000"></label>
+              <label class="span2">嵌入代码（粘贴到 NY「站点公告」，保存设置后生效）<textarea id="status-embed" rows="3" readonly class="mono"></textarea></label>
+              <div class="span2 inline"><button type="button" class="btn small" id="status-copy"><svg aria-hidden="true"><use href="#i-copy"/></svg>复制嵌入代码</button></div>
+            </div>
+
+            <div class="savebar"><span class="muted small" id="save-hint">修改后记得保存</span><button class="btn primary" type="submit">保存设置</button></div>
+          </form>
+        </div>
+        <form class="card sec-extra" id="probe-test-form" data-sec="probes">
+          <div class="card-head"><h2>检测测试</h2><span class="muted small">用当前探针检测任意 IP:端口</span></div>
+          <div class="inline">
+            <input name="host" placeholder="目标 IP，如 34.80.1.2" required>
+            <input name="port" type="number" value="22" min="1" max="65535" class="w-port">
+            <button class="btn" type="submit">测试</button>
+          </div>
+          <pre id="probe-test-result" class="code hidden"></pre>
+        </form>
+      </section>
+
+      <!-- 事件日志 -->
+      <section class="view hidden" id="view-events">
+        <div class="toolbar">
+          <div class="seg" id="ev-filter">
+            <button type="button" data-f="all" class="on">全部</button>
+            <button type="button" data-f="warn">警告以上</button>
+            <button type="button" data-f="error">错误</button>
+          </div>
+          <button class="btn small" id="btn-events-refresh" type="button"><svg aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+        </div>
+        <div class="table-card">
+          <table class="tbl" id="events-table"><thead><tr><th class="w-time">时间</th><th class="w-inst">实例</th><th class="w-type">类型</th><th>内容</th></tr></thead><tbody></tbody></table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- 实例详情抽屉 -->
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div class="drawer-title">
+      <h2 id="d-name">实例</h2>
+      <div class="d-sub"><span class="ip mono" id="d-ip" data-copy=""></span><span id="d-badges"></span></div>
+    </div>
+    <button class="icon-btn" id="drawer-close" type="button" aria-label="关闭"><svg aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="tabs" role="tablist">
+    <button type="button" data-tab="info" class="on">概览</button>
+    <button type="button" data-tab="exec">命令</button>
+    <button type="button" data-tab="config">设置</button>
+  </div>
+  <div class="drawer-body">
+    <!-- 概览 -->
+    <div class="dtab" data-tab="info">
+      <div class="actions-row" id="d-actions"></div>
+      <div class="mini-kpis">
+        <div><span class="muted small">下行</span><b id="d-rx">-</b></div>
+        <div><span class="muted small">上行</span><b id="d-tx">-</b></div>
+        <div><span class="muted small">服务</span><b id="d-svc">-</b></div>
+      </div>
+      <svg class="big-chart small-chart" id="d-chart" viewBox="0 0 600 120" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <dl class="kv" id="d-kv"></dl>
+      <h3>最近事件</h3>
+      <ul class="feed" id="d-events"></ul>
     </div>
 
-    <!-- 账号 -->
-    <div id="tab-accounts" class="tab hidden">
-      <div class="panel">
-        <h2>GCP 服务账号</h2>
-        <p class="muted">在 GCP 控制台 → IAM → 服务账号 中创建密钥（JSON），角色建议授予 <code>Compute Admin</code>（或 <code>Compute Instance Admin (v1)</code> + 使用静态 IP 时再加 <code>Compute Network Admin</code>）。使用「执行命令」还需要 <code>Service Account User</code>。</p>
-        <table class="table" id="accounts-table">
-          <thead><tr><th>名称</th><th>项目</th><th>服务账号</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+    <!-- 命令 -->
+    <div class="dtab hidden" data-tab="exec">
+      <div class="subtabs" id="exec-subtabs">
+        <button type="button" data-sub="ssh" class="on">SSH 执行</button>
+        <button type="button" data-sub="startup" id="sub-startup-btn">启动脚本</button>
       </div>
-      <form class="panel" id="account-form">
-        <h2>添加 GCP 账号</h2>
-        <label>名称<input name="name" placeholder="可选，默认使用项目 ID"></label>
-        <label>密钥 JSON 文件<input type="file" id="key-file" accept=".json,application/json"></label>
-        <label>或粘贴密钥 JSON<textarea name="key" rows="6" placeholder='{"type": "service_account", ...}'></textarea></label>
-        <button class="btn primary" type="submit">验证并添加</button>
-      </form>
-
-      <form class="panel grid2" id="server-form">
-        <h2 class="span2">添加自有服务器（非 GCP，如香港 VPS）</h2>
-        <p class="muted small-note span2">支持被墙检测 + TG 通知、实时速率与分组、执行命令、服务监控。没有服务商 API，所以不能自动换 IP / 开关机：被墙时会通知你手动处理。</p>
-        <label>名称<input name="name" required maxlength="40" placeholder="如 香港小鸡1"></label>
-        <label>IP<input name="ip" required placeholder="1.2.3.4"></label>
-        <label>SSH 端口<input name="ssh_port" type="number" value="22" min="1" max="65535"></label>
-        <label>SSH 用户<input name="ssh_user" value="root"></label>
-        <label class="span2">root 密码（可选，只用于首次自动接入，不会保存；不填则添加后复制「接入命令」到服务器上执行）<input name="password" type="password" autocomplete="new-password"></label>
-        <label>分组（速率页显示用，如 香港入口）<input name="grp" maxlength="40"></label>
-        <label>检测端口（实际在用的转发端口）<input name="check_port" type="number" value="22" min="1" max="65535"></label>
-        <label class="check span2"><input type="checkbox" name="auto_ip" checked> 被墙检测并通知</label>
-        <label class="span2">备注<input name="note"></label>
-        <div class="form-actions span2"><button class="btn primary" type="submit">添加服务器</button></div>
-      </form>
+      <div id="sub-ssh">
+        <p class="muted small" id="exec-note"></p>
+        <div class="inline">
+          <select id="exec-preset" aria-label="常用脚本"><option value="">— 常用脚本 —</option></select>
+          <button type="button" class="btn small" id="preset-save">存为常用</button>
+          <button type="button" class="btn small ghost danger" id="preset-del">删除</button>
+        </div>
+        <div class="inline wrap">
+          <span class="muted small">流量与服务上报：</span>
+          <button type="button" class="btn small" id="traffic-install">填入安装脚本</button>
+          <button type="button" class="btn small ghost" id="traffic-uninstall">填入卸载脚本</button>
+        </div>
+        <textarea id="exec-script" rows="7" spellcheck="false" class="mono" placeholder="例如：&#10;apt-get update&#10;apt-get install -y curl"></textarea>
+        <div class="inline wrap">
+          <label class="inline-label">超时
+            <select id="exec-timeout"><option value="120">2 分钟</option><option value="600" selected>10 分钟</option><option value="1800">30 分钟</option><option value="3600">60 分钟</option></select>
+          </label>
+          <span class="spacer"></span>
+          <span id="exec-status" class="muted small"></span>
+          <button type="button" class="btn small danger hidden" id="exec-stop">停止</button>
+          <button type="button" class="btn primary" id="exec-run">执行</button>
+        </div>
+        <pre id="exec-output" class="terminal hidden"></pre>
+      </div>
+      <div id="sub-startup" class="hidden">
+        <p class="muted small">写入实例元数据 <code>startup-script</code>，开机时由 GCP 执行，不依赖 SSH。</p>
+        <textarea id="startup-script" rows="7" spellcheck="false" class="mono" placeholder="开机时执行的 bash 脚本"></textarea>
+        <div class="inline wrap">
+          <label class="check"><input type="checkbox" id="startup-once" checked> 仅执行一次</label>
+          <label class="check"><input type="checkbox" id="startup-reboot"> 写入后立即重启执行</label>
+          <span class="spacer"></span>
+          <button type="button" class="btn small ghost danger" id="startup-clear">清除</button>
+          <button type="button" class="btn primary" id="startup-save">写入</button>
+        </div>
+        <div class="inline wrap"><h3 class="m0">启动日志</h3><span class="spacer"></span><label class="check"><input type="checkbox" id="serial-all"> 显示全部</label><button type="button" class="btn small" id="serial-refresh">刷新</button></div>
+        <pre id="serial-output" class="terminal">点「刷新」查看启动脚本输出</pre>
+      </div>
     </div>
 
     <!-- 设置 -->
-    <div id="tab-settings" class="tab hidden">
-      <form id="settings-form">
-        <div class="panel">
-          <h2>检测方式</h2>
-          <div class="radio-row">
-            <label class="radio"><input type="radio" name="detect_mode" value="agent"> 国内探针（本系统部署在海外时使用）</label>
-            <label class="radio"><input type="radio" name="detect_mode" value="local"> 本机直接检测（本系统部署在国内时使用）</label>
-          </div>
-          <div id="probes-block">
-            <h3>主动上报探针（推荐，探针设备不需要公网 IP）</h3>
-            <p class="muted">适合家里的路由器（OpenWrt / iStoreOS）、NAS、树莓派等。探针定时主动连接本面板领取任务并上报结果。添加后点「安装命令」获取部署方法，然后保存设置。</p>
-            <div id="push-probes"></div>
-            <button type="button" class="btn small" id="add-push-probe">+ 添加主动上报探针</button>
-            <pre id="push-install" class="result hidden"></pre>
-
-            <h3>监听模式探针（探针需要公网 IP）</h3>
-            <p class="muted">在一台有公网 IP 的国内机器上运行 <code>probe/probe.py</code>，填入地址与令牌。可添加多个，所有探针按成功率综合判断。</p>
-            <div id="probes"></div>
-            <button type="button" class="btn small" id="add-probe">+ 添加探针</button>
-          </div>
+    <form class="dtab hidden" data-tab="config" id="inst-form">
+      <div id="manual-fields" class="hidden">
+        <label>服务器名称<input name="m_name" maxlength="40"></label>
+        <label>IP（在服务商后台换了 IP 后改这里）<input name="m_ip"></label>
+        <div class="form-grid tight">
+          <label>SSH 端口<input name="m_ssh_port" type="number" min="1" max="65535"></label>
+          <label>SSH 用户<input name="m_ssh_user" placeholder="root"></label>
         </div>
-
-        <div class="panel grid2">
-          <h2 class="span2">判定与频率</h2>
-          <label>检测间隔（秒）<input type="number" name="check_interval" min="30"></label>
-          <label>连续被墙次数阈值<input type="number" name="fail_threshold" min="1"></label>
-          <label>TCP 超时（秒）<input type="number" name="tcp_timeout" step="0.5" min="1"></label>
-          <label>每次检测重试次数<input type="number" name="tcp_tries" min="1" max="5"></label>
-          <label>国内可达率阈值（0-1）<input type="number" name="cn_success_ratio" step="0.1" min="0" max="1"></label>
-          <label class="check"><input type="checkbox" name="control_check"> 海外对照检测（海外也不通时不换 IP）</label>
-          <label class="check span2"><input type="checkbox" name="verify_new_ip"> 换 IP 时先用国内探针验证新 IP，被墙就继续换下一个（推荐配合「静态 IP」模式，每个候选约多花 20-45 秒）</label>
-          <label>换 IP 冷却时间（分钟）<input type="number" name="cooldown_minutes" min="0"></label>
-          <label>每天最多自动换 IP 次数<input type="number" name="max_changes_per_day" min="0"></label>
-        </div>
-
-        <div class="panel grid2" id="status-panel">
-          <h2 class="span2">公开速率页（可嵌入 NY 面板公告）</h2>
-          <p class="muted small-note span2">按实例「分组」汇总实时上下行速率，不显示 IP 和实例名。实例需先安装流量上报（实例「命令」→「填入安装脚本」→ 执行）。NY 面板是 HTTPS 时，本面板也必须用 HTTPS 访问，否则浏览器会拦截嵌入。</p>
-          <label class="check span2"><input type="checkbox" name="status_page_enabled"> 开启公开速率页</label>
-          <label>标题<input name="status_page_title" maxlength="40"></label>
-          <label>访问密钥（链接里带上才能访问）
-            <span class="inline"><input name="status_page_key" class="mono-input" autocomplete="off" spellcheck="false"><button type="button" class="btn small" id="status-key-gen">重新生成</button></span>
-          </label>
-          <label>主题
-            <select id="status-theme"><option value="dark">深色（品牌色，推荐）</option><option value="light">浅色</option><option value="auto">跟随系统</option></select>
-          </label>
-          <label>嵌入高度（px，按分组数自动估算，可手动改）<input id="status-height" type="number" value="260" min="120" max="3000"></label>
-          <label class="span2">嵌入代码（粘贴到 NY「站点公告」，保存设置后生效）
-            <textarea id="status-embed" rows="3" readonly></textarea>
-          </label>
-          <div class="span2 inline"><button type="button" class="btn small" id="status-copy">复制嵌入代码</button><a id="status-open" class="btn small ghost" target="_blank" rel="noopener">预览速率页</a></div>
-        </div>
-
-        <div class="panel grid2">
-          <h2 class="span2">通知与 DNS</h2>
-          <label>Telegram Bot Token<input name="telegram_bot_token" autocomplete="off"></label>
-          <label>Telegram Chat ID<input name="telegram_chat_id" autocomplete="off"></label>
-          <div class="span2 inline"><button type="button" class="btn small" id="tg-test">发送测试通知</button><span class="muted small-note" style="margin:0">用当前填写的 Token 和 Chat ID 发一条测试消息（无需先保存）</span></div>
-          <label class="span2">Cloudflare API Token（需 DNS 编辑权限，换 IP 后自动更新实例绑定的域名）<input name="cf_api_token" autocomplete="off"></label>
-          <h3 class="span2">服务监控（需在实例 / 服务器上安装流量上报）</h3>
-          <label class="check span2"><input type="checkbox" name="service_alert_enabled"> 服务停止或机器失联时发 TG 通知（恢复时也通知）</label>
-          <label>监控的服务名（systemd 服务，如 nyanpass；改了需重新安装上报）<input name="watch_service" placeholder="nyanpass"></label>
-          <label>持续多少秒才通知<input name="service_alert_seconds" type="number" min="20"></label>
-        </div>
-        <div class="form-actions"><button class="btn primary" type="submit">保存设置</button></div>
-      </form>
-
-      <form class="panel" id="probe-test-form">
-        <h2>检测测试</h2>
-        <div class="inline">
-          <input name="host" placeholder="目标 IP，如 34.80.1.2" required>
-          <input name="port" type="number" value="22" min="1" max="65535" style="width:100px">
-          <button class="btn" type="submit">测试</button>
-        </div>
-        <pre id="probe-test-result" class="result hidden"></pre>
-      </form>
-    </div>
-
-    <!-- 日志 -->
-    <div id="tab-events" class="tab hidden">
-      <div class="panel">
-        <div class="toolbar"><h2>事件日志</h2><button class="btn small" id="btn-events-refresh">刷新</button></div>
-        <table class="table" id="events-table">
-          <thead><tr><th style="width:160px">时间</th><th style="width:140px">实例</th><th style="width:90px">类型</th><th>内容</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="inline wrap"><button type="button" class="btn small" id="m-bootstrap"><svg aria-hidden="true"><use href="#i-copy"/></svg>复制接入命令</button><span class="muted small">在服务器上用 root 执行一次：写入面板公钥 + 安装上报</span></div>
       </div>
-    </div>
-  </main>
-</section>
-
-<!-- 实例设置弹窗 -->
-<dialog id="inst-dialog">
-  <form id="inst-form" method="dialog">
-    <h2 id="inst-dialog-title">实例设置</h2>
-    <div id="manual-fields" class="hidden">
-      <label>服务器名称<input name="m_name" maxlength="40"></label>
-      <label>IP（在服务商后台换了 IP 后改这里）<input name="m_ip"></label>
-      <div class="grid2">
-        <label>SSH 端口<input name="m_ssh_port" type="number" min="1" max="65535"></label>
-        <label>SSH 用户<input name="m_ssh_user" placeholder="root"></label>
+      <label class="check"><input type="checkbox" name="auto_ip"> <span id="auto-ip-label">被墙自动更换 IP</span></label>
+      <div id="gcp-fields"><label class="check"><input type="checkbox" name="auto_start"> 关机 / 被回收时自动开机</label></div>
+      <label>检测端口（实际在用的转发 / 入口端口，如 443）<input type="number" name="check_port" min="1" max="65535"></label>
+      <div id="gcp-fields-2">
+        <label>IP 类型
+          <select name="ip_mode">
+            <option value="static">静态 IP（推荐：换 IP 更快、能占住被墙 IP）</option>
+            <option value="ephemeral">临时 IP</option>
+          </select>
+        </label>
+        <div class="form-grid tight">
+          <label>Cloudflare Zone ID<input name="dns_zone_id" placeholder="可选"></label>
+          <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选"></label>
+        </div>
       </div>
-      <div class="inline" style="margin-bottom:12px"><button type="button" class="btn small" id="m-bootstrap">复制接入命令</button><span class="muted small-note" style="margin:0">在服务器上用 root 执行一次：写入面板公钥 + 安装上报</span></div>
-    </div>
-    <label class="check"><input type="checkbox" name="auto_ip"> <span id="auto-ip-label">被墙自动更换 IP</span></label>
-    <div id="gcp-fields">
-      <label class="check"><input type="checkbox" name="auto_start"> 关机/被回收时自动开机</label>
-    </div>
-    <label>检测端口（实际在用的转发 / 入口端口，如 443；也可填 SSH 22）<input type="number" name="check_port" min="1" max="65535"></label>
-    <div id="gcp-fields-2">
-      <label>IP 类型
-        <select name="ip_mode">
-          <option value="ephemeral">临时 IP（换 IP 即重新分配）</option>
-          <option value="static">静态 IP（推荐，换 IP 更快：预留新地址并释放旧的）</option>
-        </select>
-      </label>
-      <label>Cloudflare Zone ID<input name="dns_zone_id" placeholder="可选"></label>
-      <label>绑定域名（A 记录）<input name="dns_record" placeholder="可选，如 node1.example.com"></label>
-    </div>
-    <label>分组（用于公开速率页，如 香港入口；留空则不在速率页显示）<input name="grp" maxlength="40"></label>
-    <label>备注<input name="note"></label>
-    <div class="form-actions">
-      <button class="btn danger ghost" type="button" id="inst-delete">删除实例</button>
-      <span class="spacer"></span>
-      <button class="btn ghost" value="cancel" formnovalidate>取消</button>
-      <button class="btn primary" value="save">保存</button>
-    </div>
-  </form>
-</dialog>
+      <label>分组（公开速率页显示，留空不显示）<input name="grp" maxlength="40"></label>
+      <label>备注<input name="note"></label>
+      <div class="form-actions"><button class="btn primary" type="submit">保存</button></div>
+      <div class="danger-zone">
+        <div><b id="danger-title">删除实例</b><div class="muted small" id="danger-desc">实例和启动盘中的数据将无法恢复</div></div>
+        <button class="btn danger" type="button" id="inst-delete">删除</button>
+      </div>
+    </form>
+  </div>
+</aside>
 
-<!-- 新建实例弹窗 -->
+<!-- 新建实例 -->
 <dialog id="create-dialog" class="wide">
   <form id="create-form">
-    <div class="dialog-head">
-      <h2>新建实例</h2>
-      <button class="btn small ghost" type="button" id="create-close">关闭</button>
-    </div>
-    <div class="grid2">
+    <div class="dialog-head"><h2>新建实例</h2><button class="icon-btn" type="button" id="create-close" aria-label="关闭"><svg aria-hidden="true"><use href="#i-x"/></svg></button></div>
+    <div class="form-grid">
       <label>账号 / 项目<select name="account"></select></label>
       <label>实例名称<input name="name" required pattern="[a-z]([a-z0-9\-]{0,61}[a-z0-9])?" title="小写字母、数字、短横线，以字母开头"></label>
       <label>区域 / 可用区<select name="zone" required></select></label>
@@ -270,101 +435,29 @@
       <label>系统<select name="image"></select></label>
       <label>磁盘大小（GB）<input name="disk_size_gb" type="number" min="10" max="2000" value="20"></label>
       <label>磁盘类型
-        <select name="disk_type">
-          <option value="pd-balanced">平衡型 pd-balanced（推荐）</option>
-          <option value="pd-standard">标准型 pd-standard（最便宜，较慢）</option>
-          <option value="pd-ssd">SSD pd-ssd（最快，较贵）</option>
-        </select>
+        <select name="disk_type"><option value="pd-balanced">平衡型 pd-balanced（推荐）</option><option value="pd-standard">标准型 pd-standard</option><option value="pd-ssd">SSD pd-ssd</option></select>
       </label>
       <label>网络层级
-        <select name="network_tier">
-          <option value="PREMIUM">高级（推荐，国内连接通常更好）</option>
-          <option value="STANDARD">标准（流量更便宜，部分区域不支持）</option>
-        </select>
+        <select name="network_tier"><option value="PREMIUM">高级（国内连接通常更好）</option><option value="STANDARD">标准（另一套 IP 池，流量更便宜）</option></select>
       </label>
-      <label class="check span2"><input type="checkbox" name="spot"> Spot 抢占式实例（便宜约 60-90%，但随时可能被 GCP 回收关机，建议同时开启自动开机）</label>
-      <h3 class="span2 sub-title">面板设置</h3>
+      <label class="check span2"><input type="checkbox" name="spot"> Spot 抢占式（便宜 60-90%，可能被回收，建议开启自动开机）</label>
+      <h3 class="span2">面板设置</h3>
       <label class="check"><input type="checkbox" name="auto_ip" checked> 被墙自动更换 IP</label>
-      <label class="check"><input type="checkbox" name="auto_start"> 关机/被回收时自动开机</label>
+      <label class="check"><input type="checkbox" name="auto_start"> 关机 / 被回收时自动开机</label>
       <label>检测端口<input name="check_port" type="number" min="1" max="65535" value="22"></label>
-      <label>网络标记（可选，用于防火墙规则）<input name="tags" placeholder="如 proxy-server"></label>
+      <label>网络标记（可选）<input name="tags" placeholder="proxy-server"></label>
       <label class="span2">备注（可选）<input name="note"></label>
-      <label class="span2">开机后执行的脚本（可选，仅执行一次，可在「命令 → 启动脚本」查看日志）
+      <label class="span2">开机后执行一次的脚本（可选）
         <select id="create-preset"><option value="">— 从常用脚本填入 —</option></select>
-        <textarea name="startup_script" rows="5" spellcheck="false" placeholder="例如：&#10;apt-get update && apt-get install -y curl"></textarea>
+        <textarea name="startup_script" rows="4" spellcheck="false" class="mono" placeholder="例如：NY 对接命令"></textarea>
       </label>
     </div>
-    <p class="muted small-note">面板 SSH 公钥会在创建时自动写入，创建后可直接用「命令」执行脚本。新实例使用临时外网 IP，不附加服务账号（权限最小）。</p>
-    <div class="form-actions">
-      <span id="create-hint" class="muted"></span>
-      <span class="spacer"></span>
-      <button class="btn primary" type="submit">创建实例</button>
-    </div>
+    <p class="muted small">面板 SSH 公钥会在创建时写入，建好即可执行命令。不附加服务账号。</p>
+    <div class="form-actions"><span id="create-hint" class="muted small"></span><span class="spacer"></span><button class="btn primary" type="submit">创建实例</button></div>
   </form>
 </dialog>
 
-<!-- 执行命令弹窗 -->
-<dialog id="exec-dialog" class="wide">
-  <div class="dialog-head">
-    <h2 id="exec-title">执行命令</h2>
-    <button class="btn small ghost" id="exec-close" type="button">关闭</button>
-  </div>
-  <nav class="subtabs">
-    <button type="button" data-sub="ssh" class="active">SSH 执行</button>
-    <button type="button" data-sub="startup" id="sub-startup-btn">启动脚本</button>
-  </nav>
-
-  <div id="sub-ssh">
-    <p class="muted small-note" id="exec-note">以 root 身份在实例上执行 bash 脚本，实时显示输出。首次执行会自动把面板公钥写入实例（用户 <code>gcpvm</code>），需要防火墙放行 22 端口。</p>
-    <div class="inline preset-row">
-      <select id="exec-preset"><option value="">— 常用脚本 —</option></select>
-      <button type="button" class="btn small" id="preset-save">存为常用</button>
-      <button type="button" class="btn small danger" id="preset-del">删除</button>
-    </div>
-    <div class="inline preset-row">
-      <span class="muted small-note" style="margin:0">流量上报（实时速率）：</span>
-      <button type="button" class="btn small" id="traffic-install">填入安装脚本</button>
-      <button type="button" class="btn small" id="traffic-uninstall">填入卸载脚本</button>
-    </div>
-    <textarea id="exec-script" rows="8" spellcheck="false" placeholder="例如：&#10;apt-get update&#10;apt-get install -y curl"></textarea>
-    <div class="inline exec-actions">
-      <label class="inline-label">超时
-        <select id="exec-timeout">
-          <option value="120">2 分钟</option>
-          <option value="600" selected>10 分钟</option>
-          <option value="1800">30 分钟</option>
-          <option value="3600">60 分钟</option>
-        </select>
-      </label>
-      <span class="spacer"></span>
-      <span id="exec-status" class="muted"></span>
-      <button type="button" class="btn small danger hidden" id="exec-stop">停止</button>
-      <button type="button" class="btn primary" id="exec-run">执行</button>
-    </div>
-    <pre id="exec-output" class="terminal hidden"></pre>
-  </div>
-
-  <div id="sub-startup" class="hidden">
-    <p class="muted small-note">把脚本写入实例元数据 <code>startup-script</code>，开机时由 GCP 自动执行。不依赖 SSH，SSH 连不上时也能用，但需要重启才会执行。</p>
-    <textarea id="startup-script" rows="8" spellcheck="false" placeholder="开机时执行的 bash 脚本"></textarea>
-    <div class="inline exec-actions">
-      <label class="check"><input type="checkbox" id="startup-once" checked> 仅执行一次</label>
-      <label class="check"><input type="checkbox" id="startup-reboot"> 写入后立即重启执行</label>
-      <span class="spacer"></span>
-      <button type="button" class="btn small danger" id="startup-clear">清除</button>
-      <button type="button" class="btn primary" id="startup-save">写入</button>
-    </div>
-    <div class="inline exec-actions">
-      <h3 class="log-title">启动日志（串口输出）</h3>
-      <span class="spacer"></span>
-      <label class="check"><input type="checkbox" id="serial-all"> 显示全部</label>
-      <button type="button" class="btn small" id="serial-refresh">刷新</button>
-    </div>
-    <pre id="serial-output" class="terminal">点「刷新」查看最近的启动脚本输出</pre>
-  </div>
-</dialog>
-
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

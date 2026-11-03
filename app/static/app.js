@@ -448,7 +448,7 @@ function openDrawer(id, tab = "info") {
   drawerId = inst.id;
   $("#drawer").classList.add("open");
   $("#drawer").setAttribute("aria-hidden", "false");
-  if (changed) { resetExec(); fillConfig(inst); loadDrawerEvents(); }
+  if (changed) { resetExec(); fillConfig(inst); loadDrawerEvents(); loadPresets().then(() => { if (drawerId === inst.id) renderBootScripts(byId(inst.id) || inst); }); }
   setDrawerTab(tab);
   renderDrawer();
   $$("#inst-table tr[data-id]").forEach((tr) => tr.classList.toggle("sel", +tr.dataset.id === drawerId));
@@ -503,7 +503,8 @@ function renderDrawer() {
   ] : [
     ["区域", i.zone], ["机型", `${i.machine_type}${i.preemptible ? " · Spot" : ""}`], ["内网 IP", i.internal_ip || "-"],
     ["IP 类型", i.ip_mode === "static" ? "静态 IP" : "临时 IP"], ["网络层级", i.network_tier || "-"], ["检测端口", i.check_port],
-    ["自动换 IP", i.auto_ip ? "开" : "关"], ["自动开机", i.auto_start ? "开" : "关"], ["自动替补", i.auto_replace ? "开" : "关"], ["分组", i.grp || "-"],
+    ["自动换 IP", i.auto_ip ? "开" : "关"], ["自动开机", i.auto_start ? "开" : "关"], ["自动替补", i.auto_replace ? "开" : "关"],
+    ["替补开机命令", bootNames(i).join("、") || "-"], ["分组", i.grp || "-"],
     ["上次检测", fmtTime(i.last_check)], ["上次换 IP", fmtTime(i.last_change_at)], ["项目", i.account_name], ["备注", i.note || "-"],
   ];
   $("#d-kv").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
@@ -687,6 +688,17 @@ $("#serial-refresh").addEventListener("click", (e) => busy(e.currentTarget, asyn
 }));
 
 /* ---- 设置 ---- */
+function bootNames(inst) {
+  try { const v = JSON.parse(inst.boot_scripts || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; }
+}
+function renderBootScripts(inst) {
+  const box = $("#boot-scripts");
+  const chosen = bootNames(inst);
+  const names = S.presets.map((p) => p.name);
+  const all = names.concat(chosen.filter((n) => !names.includes(n)));
+  box.innerHTML = all.length ? all.map((n) => `<label class="check"><input type="checkbox" data-boot="${esc(n)}" ${chosen.includes(n) ? "checked" : ""}> ${esc(n)}${names.includes(n) ? "" : ` <span class="muted">（已删除）</span>`}</label>`).join("")
+    : `<span class="empty-line">还没有常用脚本，先在「命令」里把脚本「存为常用」</span>`;
+}
 function fillConfig(inst) {
   const f = $("#inst-form");
   const manual = isManual(inst);
@@ -704,6 +716,7 @@ function fillConfig(inst) {
   $("#replace-field").classList.toggle("hidden", inst.provider !== "gcp");
   $("#ipmode-field").classList.toggle("hidden", inst.provider !== "gcp");
   f.auto_replace.checked = !!inst.auto_replace;
+  renderBootScripts(inst);
   $("#auto-ip-label").textContent = manual ? "被墙检测并通知（自有服务器无法自动换 IP）" : "被墙自动更换 IP";
   const gone = isGone(inst);
   $("#danger-title").textContent = manual || gone ? "从面板移除" : "删除实例";
@@ -727,7 +740,10 @@ $("#inst-form").addEventListener("submit", async (e) => {
         method: "PATCH",
         body: {
           auto_ip: f.auto_ip.checked, auto_start: f.auto_start.checked, check_port: +f.check_port.value,
-          ...(inst.provider === "gcp" ? { ip_mode: f.ip_mode.value, auto_replace: f.auto_replace.checked } : {}),
+          ...(inst.provider === "gcp" ? {
+            ip_mode: f.ip_mode.value, auto_replace: f.auto_replace.checked,
+            boot_scripts: $$("#boot-scripts [data-boot]:checked").map((x) => x.dataset.boot),
+          } : {}),
           dns_zone_id: f.dns_zone_id.value.trim(), dns_record: f.dns_record.value.trim(), note: f.note.value.trim(), grp: f.grp.value.trim(),
         },
       });
@@ -1105,11 +1121,10 @@ async function loadSettings(sub) {
       if (!el || !el.tagName) continue;
       if (el.type === "checkbox") el.checked = !!v; else el.value = v;
     }
-    const tpl = s.replace_template || {};
-    $$("#replace-sec [data-t]").forEach((el) => {
-      const v = tpl[el.dataset.t];
-      if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
-    });
+    S.tpls = { "": { ...(s.replace_template || {}) }, ...JSON.parse(JSON.stringify(s.replace_templates || {})) };
+    S.tplCur = S.tplCur && S.tpls[S.tplCur] ? S.tplCur : "";
+    renderTplSelect();
+    showTpl(S.tplCur);
     const pbox = $("#push-probes");
     pbox.innerHTML = "";
     (s.push_probes || []).forEach((p) => pbox.appendChild(pushRow(p)));
@@ -1140,7 +1155,7 @@ async function suggestStatusHeight() {
     statusEmbed();
   } catch (_) {}
 }
-$("#settings-form").addEventListener("input", (e) => { if (!["status-theme", "status-height", "status-embed"].includes(e.target.id)) markDirty(); });
+$("#settings-form").addEventListener("input", (e) => { if (!["status-theme", "status-height", "status-embed", "tpl-group"].includes(e.target.id)) markDirty(); });
 $$("[name=detect_mode]").forEach((r) => r.addEventListener("change", toggleProbeBlock));
 $("#add-probe").addEventListener("click", () => { $("#probes").appendChild(probeRow()); markDirty(); });
 $("#add-push-probe").addEventListener("click", () => { const r = pushRow(); $("#push-probes").appendChild(r); $("[data-k=name]", r).focus(); markDirty(); });
@@ -1167,6 +1182,7 @@ $("#tg-test").addEventListener("click", (e) => busy(e.currentTarget, async () =>
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.currentTarget;
+  saveTpl();
   const body = {
     detect_mode: f.querySelector("[name=detect_mode]:checked")?.value || "agent",
     control_check: f.control_check.checked,
@@ -1181,8 +1197,8 @@ $("#settings-form").addEventListener("submit", async (e) => {
     replace_enabled: f.replace_enabled.checked,
     replace_max_per_account: +f.replace_max_per_account.value || 3,
     replace_max_per_day: +f.replace_max_per_day.value || 6,
-    replace_template: Object.fromEntries($$("#replace-sec [data-t]").map((el) => [el.dataset.t,
-      el.type === "checkbox" ? el.checked : el.type === "number" ? +el.value : el.value])),
+    replace_template: S.tpls[""],
+    replace_templates: Object.fromEntries(Object.entries(S.tpls).filter(([k]) => k)),
     probes: $$(".probe-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.url),
     push_probes: $$(".push-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.name || p.token),
   };
@@ -1196,12 +1212,54 @@ $("#settings-form").addEventListener("submit", async (e) => {
     loadProbeStatus();
   });
 });
+function readTpl() {
+  return Object.fromEntries($$("#replace-sec [data-t]").map((el) => [el.dataset.t,
+    el.type === "checkbox" ? el.checked : el.type === "number" ? +el.value : el.value]));
+}
+function saveTpl() { if (S.tpls) S.tpls[S.tplCur || ""] = readTpl(); }
+function showTpl(key) {
+  S.tplCur = key;
+  const tpl = { ...S.tpls[""], ...(S.tpls[key] || {}) };
+  $$("#replace-sec [data-t]").forEach((el) => {
+    const v = tpl[el.dataset.t];
+    if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
+  });
+  $("#tpl-group").value = key;
+  $("#tpl-del").classList.toggle("hidden", !key);
+  $("#tpl-grp-field").classList.toggle("hidden", !!key);
+}
+function renderTplSelect() {
+  const groups = Object.keys(S.tpls).filter(Boolean).sort();
+  $("#tpl-group").innerHTML = `<option value="">默认模板（没有专属模板的分组）</option>` +
+    groups.map((g) => `<option value="${esc(g)}">分组：${esc(g)}</option>`).join("");
+}
+$("#tpl-group").addEventListener("change", (e) => { saveTpl(); showTpl(e.target.value); });
+$("#tpl-add").addEventListener("click", () => {
+  const existing = [...new Set(S.instances.map((i) => (i.grp || "").trim()).filter((g) => g && !S.tpls[g]))];
+  const g = (prompt(`为哪个分组添加专属替补模板？${existing.length ? "\n现有分组：" + existing.join("、") : ""}`, existing[0] || "") || "").trim();
+  if (!g) return;
+  if (g.length > 40) return toast("分组名最长 40 个字符", true);
+  saveTpl();
+  if (!S.tpls[g]) S.tpls[g] = { ...S.tpls[""], grp: g };
+  renderTplSelect();
+  showTpl(g);
+  markDirty();
+});
+$("#tpl-del").addEventListener("click", () => {
+  const g = S.tplCur;
+  if (!g || !confirm(`删除分组「${g}」的专属模板？之后该分组按默认模板替补。`)) return;
+  delete S.tpls[g];
+  renderTplSelect();
+  showTpl("");
+  markDirty();
+});
 $("#replace-create").addEventListener("click", (e) => {
   if ($(".savebar").classList.contains("dirty")) return toast("请先保存设置，再按模板新建", true);
-  if (!confirm("按替补模板，在第一个有空位的 GCP 账号新建一台实例？")) return;
+  const g = S.tplCur || "";
+  if (!confirm(`按${g ? `分组「${g}」的` : "默认"}替补模板，在第一个有空位的 GCP 账号新建一台实例？`)) return;
   busy(e.currentTarget, async () => {
     toast("正在创建，通常需要 30-60 秒…");
-    const r = await api("/api/replace/create", { method: "POST" });
+    const r = await api("/api/replace/create", { method: "POST", body: { group: g } });
     toast(`已创建 ${r.instance.name}（${r.instance.account_name}），IP ${r.instance.external_ip || "-"}`);
   });
 });

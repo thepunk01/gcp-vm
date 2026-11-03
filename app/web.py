@@ -150,8 +150,9 @@ def create_app(
         return JSONResponse({"ok": True})
 
     @protected
-    async def replace_create(_: Request):
-        inst = await asyncio.to_thread(manager.create_from_template)
+    async def replace_create(request: Request):
+        group = str((await body(request)).get("group") or "").strip()
+        inst = await asyncio.to_thread(manager.create_from_template, group)
         return JSONResponse({"instance": _clean(inst)})
 
     @protected
@@ -593,10 +594,9 @@ def create_app(
                 data[k] = int(data[k])
                 if not lo <= data[k] <= hi:
                     raise ValueError(f"{k} 范围 {lo}-{hi}")
-        if "replace_template" in data:
-            t = data["replace_template"]
+        def clean_template(t, label: str) -> dict:
             if not isinstance(t, dict):
-                raise ValueError("replace_template 必须是对象")
+                raise ValueError(f"{label}必须是对象")
             from .config import DEFAULT_SETTINGS
             base = DEFAULT_SETTINGS["replace_template"]
             clean_t = {}
@@ -609,12 +609,25 @@ def create_app(
                 else:
                     clean_t[k] = str(v or "").strip() if k != "startup_script" else str(v or "")[:65536]
             if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", clean_t["name_prefix"] or "x"):
-                raise ValueError("实例名前缀只能用小写字母、数字和短横线，以字母开头")
+                raise ValueError(f"{label}：实例名前缀只能用小写字母、数字和短横线，以字母开头")
             if clean_t["zone"] and not re.fullmatch(r"[a-z]+-[a-z]+\d+-[a-z]", clean_t["zone"]):
-                raise ValueError("替补模板的可用区格式不正确，例如 asia-east1-b")
+                raise ValueError(f"{label}：可用区格式不正确，例如 asia-east1-b")
             if not 1 <= clean_t["check_port"] <= 65535:
-                raise ValueError("检测端口范围 1-65535")
-            data["replace_template"] = clean_t
+                raise ValueError(f"{label}：检测端口范围 1-65535")
+            return clean_t
+
+        if "replace_template" in data:
+            data["replace_template"] = clean_template(data["replace_template"], "默认替补模板")
+        if "replace_templates" in data:
+            ts = data["replace_templates"]
+            if not isinstance(ts, dict):
+                raise ValueError("replace_templates 必须是对象")
+            out = {}
+            for g, t in list(ts.items())[:50]:
+                g = str(g).strip()[:40]
+                if g:
+                    out[g] = clean_template(t, f"分组「{g}」的替补模板") | {"grp": g}
+            data["replace_templates"] = out
         if "probes" in data:
             if not isinstance(data["probes"], list):
                 raise ValueError("probes 必须是列表")

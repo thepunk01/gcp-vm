@@ -106,6 +106,8 @@ DEFAULT_SETTINGS: dict = {
         "install_agent": True,
         "startup_script": "",
     },
+    # 按分组的替补模板：{"台湾入口": {...同 replace_template...}}；分组没有专属模板时用 replace_template
+    "replace_templates": {},
     # 「执行命令」里的常用脚本：[{"name": "...", "script": "..."}]
     "script_presets": [
         {

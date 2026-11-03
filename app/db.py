@@ -84,6 +84,7 @@ INSTANCE_CONFIG_FIELDS = {
     "note": str,
     "grp": str,
     "auto_replace": int,
+    "boot_scripts": list,
 }
 CLOUD_KINDS = ("gcp", "azure")
 
@@ -112,6 +113,7 @@ class Database:
             ("ssh_port", "INTEGER DEFAULT 22"),
             ("ssh_user", "TEXT DEFAULT ''"),
             ("auto_replace", "INTEGER DEFAULT 0"),
+            ("boot_scripts", "TEXT DEFAULT '[]'"),   # 替补新机首次开机要执行的常用脚本名（JSON 列表）
         ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE instances ADD COLUMN {name} {ddl}")
@@ -316,6 +318,14 @@ class Database:
         for k, cast in INSTANCE_CONFIG_FIELDS.items():
             if k in values and values[k] is not None:
                 v = values[k]
+                if k == "boot_scripts":
+                    if isinstance(v, str):
+                        v = json.loads(v or "[]")
+                    if not isinstance(v, list):
+                        raise ValueError("boot_scripts 必须是列表")
+                    names = [str(x).strip()[:60] for x in v if str(x).strip()]
+                    clean[k] = json.dumps(list(dict.fromkeys(names))[:20], ensure_ascii=False)
+                    continue
                 clean[k] = int(bool(v)) if k in ("auto_ip", "auto_start", "auto_replace") else cast(v)
         if "ip_mode" in clean and clean["ip_mode"] not in ("ephemeral", "static"):
             raise ValueError("ip_mode 只能是 ephemeral 或 static")

@@ -299,12 +299,17 @@
             </div>
 
             <div class="card form-grid sec" data-sec="replace" id="replace-sec">
-              <div class="card-head span2"><h2>自动替补（GCP）</h2><button type="button" class="btn small" id="replace-create"><svg aria-hidden="true"><use href="#i-plus"/></svg>按模板新建一台</button></div>
+              <div class="card-head span2"><h2>自动替补（GCP）</h2><button type="button" class="btn small" id="replace-create"><svg aria-hidden="true"><use href="#i-plus"/></svg>按当前模板新建一台</button></div>
               <p class="muted small span2">勾选了「自动替补」的 GCP 实例，在<b>账号被封 / 停用</b>（连续两轮检测确认）或<b>实例被删除、挂起</b>时，按下面的模板在下一个有空位的账号新建一台，并沿用原实例的分组、检测端口、自动换 IP 和 Cloudflare 域名，然后 TG 通知。每个账号开满上限后自动用下一个账号。注意：在 GCP 控制台手动删除这类实例也会触发替补，不想替补请先在面板删除。</p>
               <label class="check span2"><input type="checkbox" name="replace_enabled"> 开启自动替补</label>
               <label>每个账号最多实例数<input type="number" name="replace_max_per_account" min="1" max="100"></label>
               <label>24 小时内最多替补台数（防失控）<input type="number" name="replace_max_per_day" min="1" max="200"></label>
-              <h3 class="span2">替补模板</h3>
+              <h3 class="span2">替补模板 <span class="muted small">哪个分组的机器挂了，就用哪个分组的模板；分组没有专属模板时用默认模板</span></h3>
+              <div class="span2 tpl-bar">
+                <label>正在编辑<select id="tpl-group"></select></label>
+                <button type="button" class="btn small" id="tpl-add"><svg aria-hidden="true"><use href="#i-plus"/></svg>为分组添加模板</button>
+                <button type="button" class="btn small ghost danger hidden" id="tpl-del">删除此分组模板</button>
+              </div>
               <label>实例名前缀<input data-t="name_prefix" placeholder="gcp"></label>
               <label>可用区<input data-t="zone" placeholder="asia-east1-b"></label>
               <label>机型<input data-t="machine_type" placeholder="e2-highcpu-4（4 核 4 GB）"></label>
@@ -316,7 +321,7 @@
               <label>网络层级<select data-t="network_tier"><option value="PREMIUM">高级 PREMIUM</option><option value="STANDARD">标准 STANDARD</option></select></label>
               <label>IP 类型<select data-t="ip_mode"><option value="static">静态 IP</option><option value="ephemeral">临时 IP</option></select></label>
               <label>检测端口（新建时）<input type="number" data-t="check_port" min="1" max="65535"></label>
-              <label>分组（新建时）<input data-t="grp" maxlength="40"></label>
+              <label id="tpl-grp-field">分组（用默认模板新建时）<input data-t="grp" maxlength="40"></label>
               <label class="span2">网络标记（可选）<input data-t="tags" placeholder="proxy-server"></label>
               <label class="check span2"><input type="checkbox" data-t="spot"> Spot 抢占式</label>
               <label class="check span2"><input type="checkbox" data-t="install_agent"> 自动安装面板流量 / 服务上报</label>
@@ -444,7 +449,13 @@
       </div>
       <label class="check"><input type="checkbox" name="auto_ip"> <span id="auto-ip-label">被墙自动更换 IP</span></label>
       <div id="gcp-fields"><label class="check"><input type="checkbox" name="auto_start"> 关机 / 被回收时自动开机</label></div>
-      <div id="replace-field"><label class="check"><input type="checkbox" name="auto_replace"> 账号被封 / 实例被删除时自动替补（设置 →「自动替补」）</label></div>
+      <div id="replace-field">
+        <label class="check"><input type="checkbox" name="auto_replace"> 账号被封 / 实例被删除时自动替补（按分组的替补模板）</label>
+        <div class="boot-box">
+          <div class="muted small">替补新机首次开机自动执行（勾选「常用脚本」，按列表顺序执行，在模板脚本之后）</div>
+          <div id="boot-scripts" class="checklist"></div>
+        </div>
+      </div>
       <label>检测端口（实际在用的转发 / 入口端口，如 443）<input type="number" name="check_port" min="1" max="65535"></label>
       <div id="gcp-fields-2">
         <label id="ipmode-field">IP 类型

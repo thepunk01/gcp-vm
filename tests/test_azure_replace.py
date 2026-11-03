@@ -394,3 +394,39 @@ def test_azure_client_http():
     c.start("rg1", "v1")
     assert sum(1 for m, u, _ in sess.log if "/op/1" in u) == 2
     assert all(p.get("api-version") for m, u, p in sess.log if "/op/" not in u)
+
+
+def _inner_script(fake, name):
+    import base64, re
+    script = fake.metadata[("asia-east1-b", name)]["startup-script"]
+    return base64.b64decode(re.search(r"echo '([^']+)' \| base64 -d", script).group(1)).decode()
+
+
+def test_replace_uses_group_template_and_boot_scripts(renv):
+    mgr, db, (a, b, c), accs = renv
+    db.update_settings({
+        "script_presets": [{"name": "装 nyanpass", "script": "echo install-ny"}, {"name": "开启 BBR", "script": "echo bbr"}],
+        "replace_templates": {"台湾入口": {"zone": "asia-east1-b", "machine_type": "e2-standard-2", "name_prefix": "tw",
+                                         "startup_script": "echo tw-group", "install_agent": False}},
+    })
+    old = db.list_instances()[0]
+    db.update_instance_config(old["id"], {"boot_scripts": ["开启 BBR", "装 nyanpass", "已删除的脚本"]})
+    del a.instances[("asia-east1-b", "vm1")]
+    mgr.replace_cycle()
+    new = db.list_instances()[0]
+    assert new["name"].startswith("tw-") and b.inserted["machineType"].endswith("e2-standard-2")
+    inner = _inner_script(b, new["name"])
+    assert inner.index("echo tw-group") < inner.index("echo bbr") < inner.index("echo install-ny")
+    assert "panel.example.com" not in inner  # 分组模板关闭了上报安装
+    import json
+    assert json.loads(new["boot_scripts"]) == ["开启 BBR", "装 nyanpass", "已删除的脚本"] and new["grp"] == "台湾入口"
+    assert any("已跳过：已删除的脚本" in e["message"] for e in db.list_events())
+
+
+def test_group_without_template_uses_default_and_manual_group_create(renv):
+    mgr, db, (a, b, c), accs = renv
+    db.update_settings({"replace_templates": {"香港": {"name_prefix": "hk", "zone": "asia-east1-b", "machine_type": "e2-micro"}}})
+    inst = mgr.create_from_template("香港")
+    assert inst["name"].startswith("hk-") and inst["grp"] == "香港"
+    inst = mgr.create_from_template("")
+    assert inst["name"].startswith("rp-")

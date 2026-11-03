@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
@@ -799,14 +800,39 @@ class Manager:
                 and counts.get(a["id"], 0) < cap]
         return sorted(accs, key=lambda a: (a["id"] <= after_id, a["id"]))
 
-    def _create_from_template(self, acc: dict, settings: dict, base: dict | None = None) -> dict:
+    @staticmethod
+    def template_for(settings: dict, group: str) -> dict:
+        """分组有专属替补模板就用它，否则用默认模板。"""
         tpl = dict(config.DEFAULT_SETTINGS["replace_template"]) | dict(settings.get("replace_template") or {})
+        own = (settings.get("replace_templates") or {}).get((group or "").strip())
+        if own:
+            tpl = tpl | dict(own) | {"grp": group.strip()}
+        return tpl
+
+    @staticmethod
+    def _boot_names(inst: dict | None) -> list[str]:
+        try:
+            names = json.loads((inst or {}).get("boot_scripts") or "[]")
+        except ValueError:
+            return []
+        return [str(n) for n in names if str(n).strip()] if isinstance(names, list) else []
+
+    def _create_from_template(self, acc: dict, settings: dict, base: dict | None = None, group: str = "") -> dict:
+        group = ((base or {}).get("grp") or group or "").strip()
+        tpl = self.template_for(settings, group)
         prefix = re.sub(r"[^a-z0-9-]", "", str(tpl.get("name_prefix") or "gcp").lower()).strip("-") or "gcp"
         if not prefix[0].isalpha():
             prefix = "vm-" + prefix
         name = f"{prefix[:40]}-{datetime.now():%m%d%H%M}-{secrets.token_hex(2)}"
         token = secrets.token_hex(16)
         script = str(tpl.get("startup_script") or "").replace("\r\n", "\n")
+        # 原实例上勾选的常用脚本，按顺序追加到开机脚本
+        boot = self._boot_names(base)
+        presets = {p["name"]: p["script"] for p in settings.get("script_presets") or []}
+        missing = [n for n in boot if n not in presets]
+        for n in boot:
+            if n in presets:
+                script += f"\n\n# ===== 常用脚本：{n} =====\necho 'gcpvm: 开始执行「{n}」'\n(\n{presets[n]}\n) || echo 'gcpvm: 「{n}」执行失败'\n"
         panel = str(settings.get("panel_url") or "")
         if tpl.get("install_agent", True) and panel:
             try:
@@ -825,10 +851,15 @@ class Manager:
             "check_port": int(base["check_port"] if base else tpl.get("check_port") or 22),
             "note": f"自动替补 {base['name']}" if base else "按替补模板新建",
         }
+        if not script.strip():
+            data.pop("startup_script")
         inst = self.create_instance(acc["id"], data)
+        if missing:
+            self._event(inst, "replace", f"勾选的常用脚本已不存在，已跳过：{'、'.join(missing)}", "warn")
         cfg = {
             "auto_replace": True,
-            "grp": (base or {}).get("grp") or tpl.get("grp") or "",
+            "boot_scripts": boot,
+            "grp": group or tpl.get("grp") or "",
             "ip_mode": (base or {}).get("ip_mode") or tpl.get("ip_mode") or "static",
         }
         if base and base.get("dns_record"):
@@ -841,11 +872,11 @@ class Manager:
             self._update_dns(inst, inst["external_ip"])
         return inst
 
-    def _try_create(self, accounts: list[dict], settings: dict, base: dict | None) -> tuple[dict | None, list[str]]:
+    def _try_create(self, accounts: list[dict], settings: dict, base: dict | None, group: str = "") -> tuple[dict | None, list[str]]:
         errors: list[str] = []
         for acc in accounts:
             try:
-                return self._create_from_template(acc, settings, base), errors
+                return self._create_from_template(acc, settings, base, group), errors
             except ManagerError as e:
                 errors.append(f"{acc['name']}：{e}")
                 self._event(None, "replace", f"[{acc['name']}] 按模板新建失败：{e}，尝试下一个账号", "warn")
@@ -853,14 +884,14 @@ class Manager:
                     self._acct_fails[acc["id"]] = self._acct_fails.get(acc["id"], 0) + 1
         return None, errors
 
-    def create_from_template(self) -> dict:
-        """手动：按替补模板在第一个有空位的账号新建一台（用于首次开满或测试模板）。"""
+    def create_from_template(self, group: str = "") -> dict:
+        """手动：按（分组的）替补模板在第一个有空位的账号新建一台（用于首次开满或测试模板）。"""
         settings = self.db.get_settings()
         with self._replace_lock:
             accounts = self._candidate_accounts(settings)
             if not accounts:
                 raise ManagerError(f"没有可用的 GCP 账号（都已开满 {settings.get('replace_max_per_account', 3)} 台或已被封）")
-            inst, errors = self._try_create(accounts, settings, None)
+            inst, errors = self._try_create(accounts, settings, None, group)
             if not inst:
                 raise ManagerError("所有可用账号都创建失败：" + "；".join(errors)[:800])
             return inst

@@ -348,7 +348,7 @@ function filtered() {
 function rateCell(i) {
   const r = S.rates[i.id];
   if (!r || !r.last_seen) return `<span class="muted small">未安装上报</span>`;
-  if (!r.online) return `<span class="small" style="color:var(--bad)">上报中断</span>`;
+  if (!r.online) return `<span class="small" style="color:var(--bad)" title="最后上报 ${fmtTime(r.last_seen)}">上报中断 · ${fmtAgo(r.last_seen)}</span>`;
   const svc = svcOf(i);
   return `<div class="rate"><span class="down">↓ ${fmtBps(r.rx_bps)}</span>　<span class="up">↑ ${fmtBps(r.tx_bps)}</span></div>
     ${svc ? `<div class="svc" style="color:var(--${svc[1]})">${svc[0]}</div>` : ""}`;

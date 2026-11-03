@@ -11,7 +11,7 @@ import threading
 import time
 
 REPORT_INTERVAL = 2
-ONLINE_SECONDS = 10
+ONLINE_SECONDS = 20  # 连续约 8 次上报失败才判定失联，容忍偶发网络抖动
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?$|^https?://\[[0-9A-Fa-f:]+\](:\d{1,5})?$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{32,64}$")
 SVC_RE = re.compile(r"^[A-Za-z0-9@._-]{0,64}$")
@@ -23,6 +23,7 @@ AGENT_LOOP = r'''#!/bin/bash
 URL="__URL__/api/traffic-agent/report"
 TOKEN="__TOKEN__"
 SVC="__SVC__"
+FAILS=0
 while true; do
   IF=$(ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
   [ -n "$IF" ] || IF=$(awk -F: 'NR>2 {gsub(/ /,"",$1); if ($1!="lo") {print $1; exit}}' /proc/net/dev)
@@ -30,9 +31,16 @@ while true; do
   if [ -n "$SVC" ] && systemctl cat "$SVC" >/dev/null 2>&1; then ST=$(systemctl is-active "$SVC" 2>/dev/null | head -1); fi
   set -- $(sed 's/:/ /' /proc/net/dev | awk -v i="$IF" '$1==i {print $2, $10}')
   if [ -n "$1" ] && [ -n "$2" ]; then
-    curl -fsS -m 3 --connect-timeout 2 -A "gcpvm-traffic/1.1" -o /dev/null -X POST "$URL" \
+    ERR=$(curl -fsS -m 6 --connect-timeout 4 --retry 1 --retry-delay 0 -A "gcpvm-traffic/1.2" -o /dev/null -X POST "$URL" \
       -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-      -d "{\"rx\":$1,\"tx\":$2,\"iface\":\"$IF\",\"svc\":\"$ST\"}" || true
+      -d "{\"rx\":$1,\"tx\":$2,\"iface\":\"$IF\",\"svc\":\"$ST\"}" 2>&1)
+    RC=$?
+    # 只在状态变化时写日志，排查用：journalctl -u gcpvm-traffic
+    if [ $RC -ne 0 ]; then
+      FAILS=$((FAILS+1)); [ "$FAILS" = 1 ] && echo "gcpvm: 上报失败（curl $RC）：$ERR"
+    elif [ "${FAILS:-0}" -gt 0 ]; then
+      echo "gcpvm: 上报恢复，期间失败 $FAILS 次"; FAILS=0
+    fi
   fi
   sleep __INTERVAL__
 done

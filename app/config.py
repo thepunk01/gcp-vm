@@ -74,8 +74,6 @@ DEFAULT_SETTINGS: dict = {
     # Telegram 通知
     "telegram_bot_token": "",
     "telegram_chat_id": "",
-    # Cloudflare DNS 自动更新
-    "cf_api_token": "",
     # 服务监控：上报中断（失联）或 watch_service 停止超过 service_alert_seconds 秒就通知
     "service_alert_enabled": True,
     "service_alert_seconds": 60,
@@ -103,6 +101,7 @@ DEFAULT_SETTINGS: dict = {
         "check_port": 22,
         "grp": "",
         "ip_mode": "static",
+        "follow_original": True,   # 替补时沿用原实例的可用区和机型，开不出来再用模板的
         "install_agent": True,
         "startup_script": "",
     },

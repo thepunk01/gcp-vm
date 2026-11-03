@@ -79,8 +79,6 @@ INSTANCE_CONFIG_FIELDS = {
     "auto_start": int,
     "check_port": int,
     "ip_mode": str,
-    "dns_zone_id": str,
-    "dns_record": str,
     "note": str,
     "grp": str,
     "auto_replace": int,

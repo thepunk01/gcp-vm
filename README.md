@@ -18,7 +18,6 @@
   - 静态 IP：预留新地址 → 绑定 → 释放本系统创建的旧地址（用户自己预留的不会被删除）
   - 换 IP 失败时自动补回临时 IP，避免实例失联
 - **自动开机**：Spot / 抢占式实例被回收或意外关机时自动拉起
-- **Cloudflare DNS**：换 IP 后自动更新绑定域名的 A 记录
 - **Telegram 通知**：换 IP、自动开机、失败等事件推送
 - **执行命令**：在面板里直接对实例执行安装/运维脚本
   - SSH 执行：以 root 执行 bash 脚本并实时显示输出，可停止；内置常用脚本（系统信息、更新系统、开启 BBR、安装 Docker），也可保存自己的
@@ -143,7 +142,6 @@ systemctl daemon-reload && systemctl enable --now gcpvm-probe
 3. **实例** 页：点击实例的「设置」
    - 打开「被墙自动更换 IP」
    - **检测端口** 填实例上实际开放的 TCP 端口（如代理服务端口或 SSH 22），并确认 GCP 防火墙已放行
-   - 可选：填 Cloudflare Zone ID 与域名，换 IP 后自动更新 A 记录（需在检测设置中填 Cloudflare API Token）
 
 ## 新建与删除实例
 
@@ -184,7 +182,7 @@ az ad sp create-for-rbac --name gcpvm --role Contributor --scopes /subscriptions
 - 账号被封 / 停用：连续两轮检测访问账号都返回 401/403、项目被暂停、结算停用等（网络错误、5xx 不算），账号标记为「被封」；
 - 实例被删除，或被挂起（连续两轮）。
 
-每个账号最多开「每个账号最多实例数」台（默认 3），开满就用下一个账号；新实例沿用原实例的分组、检测端口、自动换 IP、Cloudflare 域名并自动更新 DNS，模板里的开机脚本（安装 nyanpass、对接 NY 等）和面板上报会自动执行，完成后 TG 通知。「24 小时内最多替补台数」防止失控。**按分组替补**：可以给每个分组添加专属模板（可用区、机型、开机脚本各不相同），哪个分组的机器挂了就用哪个分组的模板，没有专属模板的分组用默认模板。**勾选开机命令**：实例「设置」里可勾选若干「常用脚本」，它被替补时新机首次开机按列表顺序执行这些脚本（在模板脚本之后），新机继承同样的勾选。设置页的「按当前模板新建一台」可用于首次开满或测试模板。账号恢复后在账号页点「解除标记」。
+每个账号最多开「每个账号最多实例数」台（默认 3），开满就用下一个账号；新实例默认沿用原实例的可用区和机型（新账号在该区开不出来时改用模板的），并沿用分组、检测端口、自动换 IP，模板里的开机脚本（安装 nyanpass、对接 NY 等）和面板上报会自动执行，完成后 TG 通知。「24 小时内最多替补台数」防止失控。**按分组替补**：可以给每个分组添加专属模板（可用区、机型、开机脚本各不相同），哪个分组的机器挂了就用哪个分组的模板，没有专属模板的分组用默认模板。**勾选开机命令**：实例「设置」里可勾选若干「常用脚本」，它被替补时新机首次开机按列表顺序执行这些脚本（在模板脚本之后），新机继承同样的勾选。设置页的「按当前模板新建一台」可用于首次开满或测试模板。账号恢复后在账号页点「解除标记」。
 
 ## 服务监控
 
@@ -252,7 +250,7 @@ az ad sp create-for-rbac --name gcpvm --role Contributor --scopes /subscriptions
 | DELETE | `/api/accounts/{id}` | 删除账号 |
 | GET | `/api/instances` | 实例列表 |
 | POST | `/api/sync` | 从 GCP 同步实例 |
-| PATCH | `/api/instances/{id}` | 修改实例配置 `auto_ip, auto_start, check_port, ip_mode, dns_zone_id, dns_record, note` |
+| PATCH | `/api/instances/{id}` | 修改实例配置 `auto_ip, auto_start, check_port, ip_mode, grp, auto_replace, boot_scripts, note` |
 | POST | `/api/instances/{id}/action` | `{"action": "start|stop|reset|change_ip|check|refresh"}` |
 | POST | `/api/instances/{id}/exec` | SSH 执行 `{"script": "...", "timeout": 600}` → 任务 |
 | GET | `/api/jobs/{id}?offset=0` | 任务状态与从 offset 起的新输出 |
@@ -317,7 +315,7 @@ app/
   provision.py     新建实例：镜像、区域、机型筛选与请求体
   traffic.py       流量上报脚本、实时速率与分组汇总
   jobs.py          命令任务与输出缓存
-  integrations.py  Telegram 通知、Cloudflare DNS
+  integrations.py  Telegram 通知
   db.py            SQLite 存储
   web.py           Web API
   static/          Web 控制台

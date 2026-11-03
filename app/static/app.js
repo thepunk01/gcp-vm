@@ -706,8 +706,6 @@ function fillConfig(inst) {
   f.auto_start.checked = !!inst.auto_start;
   f.check_port.value = inst.check_port;
   f.ip_mode.value = inst.ip_mode === "static" ? "static" : "ephemeral";
-  f.dns_zone_id.value = inst.dns_zone_id || "";
-  f.dns_record.value = inst.dns_record || "";
   f.note.value = inst.note || "";
   f.grp.value = inst.grp || "";
   $("#manual-fields").classList.toggle("hidden", !manual);
@@ -744,7 +742,7 @@ $("#inst-form").addEventListener("submit", async (e) => {
             ip_mode: f.ip_mode.value, auto_replace: f.auto_replace.checked,
             boot_scripts: $$("#boot-scripts [data-boot]:checked").map((x) => x.dataset.boot),
           } : {}),
-          dns_zone_id: f.dns_zone_id.value.trim(), dns_record: f.dns_record.value.trim(), note: f.note.value.trim(), grp: f.grp.value.trim(),
+          note: f.note.value.trim(), grp: f.grp.value.trim(),
         },
       });
     }
@@ -1203,7 +1201,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
     push_probes: $$(".push-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.name || p.token),
   };
   for (const k of ["check_interval", "fail_threshold", "tcp_timeout", "tcp_tries", "cn_success_ratio", "cooldown_minutes", "max_changes_per_day"]) body[k] = +f.elements[k].value;
-  for (const k of ["telegram_bot_token", "telegram_chat_id", "cf_api_token"]) body[k] = f.elements[k].value.trim();
+  for (const k of ["telegram_bot_token", "telegram_chat_id"]) body[k] = f.elements[k].value.trim();
   await busy($("button[type=submit]", f), async () => {
     await api("/api/settings", { method: "PUT", body });
     toast("设置已保存");
@@ -1221,7 +1219,7 @@ function showTpl(key) {
   S.tplCur = key;
   const tpl = { ...S.tpls[""], ...(S.tpls[key] || {}) };
   $$("#replace-sec [data-t]").forEach((el) => {
-    const v = tpl[el.dataset.t];
+    const v = tpl[el.dataset.t] ?? (el.dataset.t === "follow_original" ? true : undefined);
     if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
   });
   $("#tpl-group").value = key;

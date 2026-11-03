@@ -236,7 +236,8 @@ def renv(db):
         "verify_new_ip": False, "replace_enabled": True, "replace_max_per_account": 1,
         "panel_url": "https://panel.example.com",
         "replace_template": {"zone": "asia-east1-b", "machine_type": "e2-highcpu-4", "name_prefix": "rp",
-                             "startup_script": "echo nyanpass", "install_agent": True, "ip_mode": "static"},
+                             "startup_script": "echo nyanpass", "install_agent": True, "ip_mode": "static",
+                             "follow_original": False},
     })
     accs = [db.add_account(n, FAKE_KEY) for n in ("a", "b", "c")]
     pool = FakePool(a, by_account={accs[0]["id"]: a, accs[1]["id"]: b, accs[2]["id"]: c})
@@ -407,7 +408,8 @@ def test_replace_uses_group_template_and_boot_scripts(renv):
     db.update_settings({
         "script_presets": [{"name": "装 nyanpass", "script": "echo install-ny"}, {"name": "开启 BBR", "script": "echo bbr"}],
         "replace_templates": {"台湾入口": {"zone": "asia-east1-b", "machine_type": "e2-standard-2", "name_prefix": "tw",
-                                         "startup_script": "echo tw-group", "install_agent": False}},
+                                         "startup_script": "echo tw-group", "install_agent": False,
+                                         "follow_original": False}},
     })
     old = db.list_instances()[0]
     db.update_instance_config(old["id"], {"boot_scripts": ["开启 BBR", "装 nyanpass", "已删除的脚本"]})
@@ -430,3 +432,28 @@ def test_group_without_template_uses_default_and_manual_group_create(renv):
     assert inst["name"].startswith("hk-") and inst["grp"] == "香港"
     inst = mgr.create_from_template("")
     assert inst["name"].startswith("rp-")
+
+
+def test_replace_follows_original_then_falls_back(renv):
+    from app.gcp import GCPError
+    mgr, db, (a, b, c), accs = renv
+    tpl = db.get_settings()["replace_template"] | {"follow_original": True}
+    db.update_settings({"replace_template": tpl})
+    # 原实例 vm1 是 asia-east1-b / e2-micro：沿用
+    del a.instances[("asia-east1-b", "vm1")]
+    mgr.replace_cycle()
+    assert b.inserted["machineType"].endswith("e2-micro")
+    # 原规格在新账号开不出来：同账号改用模板（e2-highcpu-4）
+    first = db.list_instances()[0]
+    orig_insert = c.insert_instance
+
+    def picky(zone, body):
+        if body["machineType"].endswith("e2-micro"):
+            raise GCPError("POST instances 失败：HTTP 503 ZONE_RESOURCE_POOL_EXHAUSTED")
+        return orig_insert(zone, body)
+    c.insert_instance = picky
+    del b.instances[("asia-east1-b", first["name"])]
+    mgr.replace_cycle()
+    new = db.list_instances()[0]
+    assert new["account_id"] == accs[2]["id"] and c.inserted["machineType"].endswith("e2-highcpu-4")
+    assert any("改用模板的可用区和机型重试" in e["message"] for e in db.list_events())

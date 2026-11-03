@@ -17,7 +17,7 @@ from .gcp import ClientPool, GCPClient, GCPError, region_of
 from . import azure as az
 from .firewall import build_body, summarize
 from .provision import IMAGES, build_instance_body, filter_machine_types, sort_zones
-from .integrations import DNSError, send_telegram, update_cloudflare_a_record
+from .integrations import send_telegram
 from .jobs import Job, JobStore
 from .traffic import DOWN_STATES, SVC_STATE_RE, TrafficHub, agent_install_script, bootstrap_script
 from .remote import (
@@ -241,7 +241,6 @@ class Manager:
         self._event(
             inst, "change_ip", f"IP 已更换（{reason}）：{old_ip or '-'} -> {new_ip}{note}", "warn", notify=True
         )
-        self._update_dns(inst, new_ip)
         return inst
 
     def _change_ip_azure(self, inst: dict, reason: str) -> dict:
@@ -487,18 +486,6 @@ class Manager:
         elif old_addr:
             self._event(inst, "change_ip", f"旧静态 IP {old_ip}（{old_addr.get('name')}）非本系统创建，已保留，请自行释放以免计费", "warn")
         return new_ip
-
-    def _update_dns(self, inst: dict, ip: str) -> None:
-        if not inst.get("dns_record"):
-            return
-        settings = self.db.get_settings()
-        try:
-            msg = update_cloudflare_a_record(
-                settings.get("cf_api_token", ""), inst.get("dns_zone_id", ""), inst["dns_record"], ip
-            )
-            self._event(inst, "dns", msg)
-        except DNSError as e:
-            self._event(inst, "dns", str(e), "error", notify=True)
 
     # ---------------- check ----------------
     def check_instance(self, instance_id: int, settings: dict | None = None) -> dict:
@@ -817,9 +804,12 @@ class Manager:
             return []
         return [str(n) for n in names if str(n).strip()] if isinstance(names, list) else []
 
-    def _create_from_template(self, acc: dict, settings: dict, base: dict | None = None, group: str = "") -> dict:
+    def _create_from_template(self, acc: dict, settings: dict, base: dict | None = None, group: str = "",
+                              place: tuple[str, str] | None = None) -> dict:
         group = ((base or {}).get("grp") or group or "").strip()
         tpl = self.template_for(settings, group)
+        if place:
+            tpl = tpl | {"zone": place[0], "machine_type": place[1]}
         prefix = re.sub(r"[^a-z0-9-]", "", str(tpl.get("name_prefix") or "gcp").lower()).strip("-") or "gcp"
         if not prefix[0].isalpha():
             prefix = "vm-" + prefix
@@ -862,26 +852,38 @@ class Manager:
             "grp": group or tpl.get("grp") or "",
             "ip_mode": (base or {}).get("ip_mode") or tpl.get("ip_mode") or "static",
         }
-        if base and base.get("dns_record"):
-            cfg |= {"dns_zone_id": base.get("dns_zone_id", ""), "dns_record": base["dns_record"]}
         if cfg["ip_mode"] not in ("ephemeral", "static"):
             cfg["ip_mode"] = "static"
         self.db.update_instance(inst["id"], traffic_token=token)
         inst = self.db.update_instance_config(inst["id"], cfg)
-        if inst.get("dns_record") and inst.get("external_ip"):
-            self._update_dns(inst, inst["external_ip"])
         return inst
+
+    def _places(self, settings: dict, base: dict | None, group: str) -> list[tuple[str, str] | None]:
+        """新建的位置顺序：开启「沿用原实例」时先用原实例的可用区和机型，再退回模板。None 表示模板。"""
+        tpl = self.template_for(settings, ((base or {}).get("grp") or group or "").strip())
+        orig = None
+        if base and tpl.get("follow_original", True) and base.get("zone") and base.get("machine_type"):
+            orig = (base["zone"], base["machine_type"])
+        if orig and orig != (tpl.get("zone"), tpl.get("machine_type")):
+            return [orig, None]
+        return [None]
 
     def _try_create(self, accounts: list[dict], settings: dict, base: dict | None, group: str = "") -> tuple[dict | None, list[str]]:
         errors: list[str] = []
+        places = self._places(settings, base, group)
         for acc in accounts:
-            try:
-                return self._create_from_template(acc, settings, base, group), errors
-            except ManagerError as e:
-                errors.append(f"{acc['name']}：{e}")
-                self._event(None, "replace", f"[{acc['name']}] 按模板新建失败：{e}，尝试下一个账号", "warn")
-                if self._is_account_fatal(e):
-                    self._acct_fails[acc["id"]] = self._acct_fails.get(acc["id"], 0) + 1
+            for place in places:
+                where = f"{place[0]} · {place[1]}" if place else "模板配置"
+                try:
+                    return self._create_from_template(acc, settings, base, group, place), errors
+                except ManagerError as e:
+                    errors.append(f"{acc['name']}（{where}）：{e}")
+                    fatal = self._is_account_fatal(e)
+                    nxt = "尝试下一个账号" if fatal or place is places[-1] else "改用模板的可用区和机型重试"
+                    self._event(None, "replace", f"[{acc['name']}] 新建失败（{where}）：{e}，{nxt}", "warn")
+                    if fatal:
+                        self._acct_fails[acc["id"]] = self._acct_fails.get(acc["id"], 0) + 1
+                        break
         return None, errors
 
     def create_from_template(self, group: str = "") -> dict:

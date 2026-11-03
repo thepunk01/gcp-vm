@@ -13,6 +13,7 @@ from . import config
 from .checker import STATE_BLOCKED, STATE_DOWN, STATE_OK, STATE_UNKNOWN, BlockChecker
 from .db import Database
 from .gcp import ClientPool, GCPClient, GCPError, region_of
+from . import azure as az
 from .firewall import build_body, summarize
 from .provision import IMAGES, build_instance_body, filter_machine_types, sort_zones
 from .integrations import DNSError, send_telegram, update_cloudflare_a_record
@@ -67,6 +68,10 @@ class Manager:
         self._locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._cycle_lock = threading.Lock()
+        self._acct_fails: dict[int, int] = {}
+        self._suspended_seen: dict[int, int] = {}
+        self._replace_warned: set[int] = set()
+        self._replace_lock = threading.Lock()
 
     # ---------------- helpers ----------------
     def _lock_for(self, instance_id: int) -> threading.Lock:
@@ -86,10 +91,26 @@ class Manager:
         return inst
 
     def _gcp_instance(self, instance_id: int) -> dict:
+        """云实例（GCP / Azure）。"""
         inst = self._instance(instance_id)
         if inst.get("provider") == "manual":
             raise ManagerError("自有服务器没有云厂商 API，不支持此操作（开关机 / 换 IP / 启动脚本等）")
+        if inst.get("status") == "LOST":
+            raise ManagerError("该实例在云端已不存在，等待自动替补（或删除这条记录）")
         return inst
+
+    def _only_gcp(self, instance_id: int) -> dict:
+        inst = self._gcp_instance(instance_id)
+        if inst.get("provider") == "azure":
+            raise ManagerError("Azure 实例不支持启动脚本 / 串口日志，请用「SSH 执行」")
+        return inst
+
+    @staticmethod
+    def _loc(inst: dict) -> tuple[str, str]:
+        """客户端定位实例的参数：GCP 为 (zone, name)，Azure 为 (资源组, name)。"""
+        if inst.get("provider") == "azure":
+            return inst["project"], inst["name"]
+        return inst["zone"], inst["name"]
 
     def _event(self, inst: dict | None, type_: str, msg: str, level: str = "info", notify: bool = False):
         iid = inst["id"] if inst else None
@@ -101,7 +122,7 @@ class Manager:
 
     def _refresh(self, inst: dict, client: GCPClient | None = None) -> dict:
         client = client or self._client(inst["account_id"])
-        live = client.get_instance(inst["zone"], inst["name"])
+        live = client.get_instance(*self._loc(inst))
         return self.db.upsert_instance(inst["account_id"], live) | {"_live": live}
 
     # ---------------- sync ----------------
@@ -109,12 +130,24 @@ class Manager:
         client = self._client(account_id)
         items = client.list_instances()
         keep = [self.db.upsert_instance(account_id, it)["id"] for it in items]
+        # 开启自动替补时，云端消失的「替补」实例保留记录并标记 LOST，等待替补
+        if self.db.get_settings().get("replace_enabled"):
+            for row in self.db.list_instances():
+                if row["account_id"] != account_id or row["id"] in keep or not row.get("auto_replace"):
+                    continue
+                keep.append(row["id"])
+                if row["status"] != "LOST":
+                    self.db.update_instance(row["id"], status="LOST")
+                    self._event(row, "replace", f"实例在云端已不存在（被删除或回收），IP {row['external_ip'] or '-'}，等待自动替补", "error", notify=True)
         self.db.remove_missing_instances(account_id, keep)
         return len(items)
 
     def sync_all(self) -> dict:
         result: dict = {}
-        for acc in self.db.list_accounts():
+        for acc in self.db.list_accounts("cloud"):
+            if acc.get("status") == "banned":
+                result[acc["name"]] = "已标记为被封/停用，跳过（可在账号页解除标记）"
+                continue
             try:
                 result[acc["name"]] = self.sync_account(acc["id"])
             except Exception as e:  # noqa: BLE001
@@ -133,7 +166,7 @@ class Manager:
             raise ManagerError("该实例正在执行其他操作，请稍后")
         try:
             client = self._client(inst["account_id"])
-            getattr(client, action)(inst["zone"], inst["name"])
+            getattr(client, action)(*self._loc(inst))
             inst = self._refresh(inst, client)
             self._event(
                 inst, action, f"{source}{label}成功，当前状态 {inst['status']}，IP {inst['external_ip'] or '-'}",
@@ -153,6 +186,8 @@ class Manager:
         if not lock.acquire(timeout=1):
             raise ManagerError("该实例正在执行其他操作，请稍后")
         try:
+            if inst.get("provider") == "azure":
+                return self._change_ip_azure(inst, reason)
             return self._change_ip_locked(inst, reason)
         finally:
             lock.release()
@@ -189,7 +224,9 @@ class Manager:
             except GCPError as e2:
                 self._event(inst, "change_ip", f"补回外网 IP 失败：{e2}", "error", notify=True)
             raise ManagerError(str(e)) from e
+        return self._after_change(inst, client, old_ip, new_ip, vinfo, reason)
 
+    def _after_change(self, inst: dict, client, old_ip: str, new_ip: str, vinfo: dict, reason: str) -> dict:
         inst = self.db.update_instance(
             inst["id"], last_change_at=time.time(), fail_count=0,
             cn_state=STATE_OK if vinfo["verified"] else STATE_UNKNOWN,
@@ -205,6 +242,71 @@ class Manager:
         )
         self._update_dns(inst, new_ip)
         return inst
+
+    def _change_ip_azure(self, inst: dict, reason: str) -> dict:
+        """Azure：新建 Standard 静态公网 IP 换到网卡上，验证通过后删除旧 IP；被墙的候选 IP 先占住，结束后统一删除。"""
+        client = self._client(inst["account_id"])
+        rg, name = inst["project"], inst["name"]
+        live = client.get_instance(rg, name)
+        if not live["nic_id"]:
+            raise ManagerError("找不到虚拟机的网卡")
+        old_ip, old_pip = live["external_ip"], live["pip_id"]
+        if old_ip and reason != "手动":
+            self.db.add_blocked_ip(old_ip, inst["id"])
+        try:  # 清理之前中断残留的、未绑定的本系统公网 IP
+            for p in client.list_public_ips(rg):
+                if p["name"].startswith(az.PREFIX) and not p["attached"] and p["id"].lower() != old_pip.lower():
+                    client.delete_resource(p["id"])
+                    self._event(inst, "change_ip", f"已删除残留的未使用公网 IP {p['name']}（{p['address'] or '-'}）")
+        except GCPError as e:
+            log.warning("[%s] 清理残留公网 IP 失败：%s", name, e)
+        avoid = self.db.recent_blocked_ips()
+        if old_ip:
+            avoid.add(old_ip)
+        verify, vinfo = self._make_verifier(inst)
+        stamp = datetime.now().strftime("%m%d%H%M%S") + secrets.token_hex(2)
+        rejected: list[str] = []
+        attached = ""
+        new_ip = ""
+        try:
+            try:
+                for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
+                    pname = f"{az.PREFIX}{name}"[:60].rstrip("-") + f"-{stamp}-{attempt}"
+                    pid, ip = client.create_public_ip(rg, inst["zone"], pname, live.get("pip_zones") or None)
+                    if not ip or ip in avoid:
+                        rejected.append(pid)
+                        continue
+                    client.set_nic_public_ip(live["nic_id"], live["ipconfig_name"], pid)
+                    attached = pid
+                    if verify is None:
+                        new_ip = ip
+                        break
+                    ok, detail = verify(ip)
+                    if ok:
+                        new_ip = ip
+                        break
+                    avoid.add(ip)
+                    self._reject_candidate(inst, ip, detail, attempt)
+                    rejected.append(pid)
+                if not new_ip:
+                    raise GCPError(f"连续 {MAX_EPHEMERAL_TRIES} 个新公网 IP 都是被墙的，本次放弃；下一轮检测会继续尝试")
+            finally:
+                for pid in rejected:
+                    if pid == attached:
+                        continue
+                    try:
+                        client.delete_resource(pid)
+                    except GCPError as e:
+                        self._event(inst, "change_ip", f"删除被拒绝的公网 IP 失败：{e}", "warn")
+        except GCPError as e:
+            self._event(inst, "change_ip", f"更换 IP 失败（{reason}）：{e}", "error", notify=True)
+            raise ManagerError(str(e)) from e
+        if old_pip and old_pip.lower() != attached.lower():
+            try:
+                client.delete_resource(old_pip)
+            except GCPError as e:
+                self._event(inst, "change_ip", f"删除旧公网 IP {old_ip} 失败：{e}，请到 Azure 门户删除以免计费", "warn")
+        return self._after_change(inst, client, old_ip, new_ip, vinfo, reason)
 
     def _make_verifier(self, inst: dict):
         """生成“新 IP 国内可达性”验证函数：返回 (是否接受, 说明)。
@@ -420,6 +522,8 @@ class Manager:
     def process_instance(self, inst: dict, settings: dict) -> None:
         if inst.get("provider") == "manual":
             self._process_manual(inst, settings)
+            return
+        if inst["status"] == "LOST" or inst.get("account_status") == "banned":
             return
         if not (inst["auto_ip"] or inst["auto_start"]):
             return
@@ -649,6 +753,11 @@ class Manager:
             return
         try:
             settings = self.db.get_settings()
+            try:
+                self.replace_cycle(settings)
+            except Exception as e:  # noqa: BLE001
+                log.exception("自动替补出错")
+                self._event(None, "replace", f"自动替补出错：{e}", "error")
             for inst in self.db.list_instances():
                 try:
                     self.process_instance(inst, settings)
@@ -657,6 +766,191 @@ class Manager:
                     self._event(inst, "check", f"检测出错：{e}", "error")
         finally:
             self._cycle_lock.release()
+
+    # ---------------- 自动替补（仅 GCP） ----------------
+    ACCOUNT_FAIL_LIMIT = 2  # 连续几轮检测都确认账号不可用，才判定为被封
+
+    @staticmethod
+    def _is_account_fatal(e: Exception) -> bool:
+        """账号级不可用：认证失败、无权限、项目被暂停/删除、结算停用、API 被禁用。网络错误、5xx 不算。"""
+        msg = str(e)
+        low = msg.lower()
+        if "获取访问令牌失败" in msg and ("http 400" in low or "http 401" in low):
+            return True
+        hints = ("http 401", "http 403", "suspend", "billing", "invalid_grant", "scheduled for deletion",
+                 "has been deleted", "account not found", "is disabled", "it is disabled", "project not found")
+        return any(h in low for h in hints)
+
+    def _gcp_accounts(self) -> list[dict]:
+        return self.db.list_accounts("gcp")
+
+    def _slot_counts(self) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for i in self.db.list_instances():
+            if i["provider"] == "gcp" and i["status"] != "LOST":
+                counts[i["account_id"]] = counts.get(i["account_id"], 0) + 1
+        return counts
+
+    def _candidate_accounts(self, settings: dict, after_id: int = 0, exclude: int | None = None) -> list[dict]:
+        """有空位、未被封的 GCP 账号，从 after_id 之后的下一个账号开始轮。"""
+        cap = max(1, int(settings.get("replace_max_per_account", 3)))
+        counts = self._slot_counts()
+        accs = [a for a in self._gcp_accounts() if a["status"] != "banned" and a["id"] != exclude
+                and counts.get(a["id"], 0) < cap]
+        return sorted(accs, key=lambda a: (a["id"] <= after_id, a["id"]))
+
+    def _create_from_template(self, acc: dict, settings: dict, base: dict | None = None) -> dict:
+        tpl = dict(config.DEFAULT_SETTINGS["replace_template"]) | dict(settings.get("replace_template") or {})
+        prefix = re.sub(r"[^a-z0-9-]", "", str(tpl.get("name_prefix") or "gcp").lower()).strip("-") or "gcp"
+        if not prefix[0].isalpha():
+            prefix = "vm-" + prefix
+        name = f"{prefix[:40]}-{datetime.now():%m%d%H%M}-{secrets.token_hex(2)}"
+        token = secrets.token_hex(16)
+        script = str(tpl.get("startup_script") or "").replace("\r\n", "\n")
+        panel = str(settings.get("panel_url") or "")
+        if tpl.get("install_agent", True) and panel:
+            try:
+                agent = agent_install_script(panel, token, str(settings.get("watch_service") or ""))
+                script = f"# 面板流量 / 服务状态上报\n(\n{agent}\n) || echo 'gcpvm: 上报安装失败'\n\n{script}"
+            except ValueError as e:
+                log.warning("生成上报脚本失败：%s", e)
+        spot = bool(tpl.get("spot"))
+        data = {
+            "name": name, "zone": tpl.get("zone"), "machine_type": tpl.get("machine_type"), "image": tpl.get("image"),
+            "disk_size_gb": tpl.get("disk_size_gb", 20), "disk_type": tpl.get("disk_type", "pd-balanced"),
+            "network_tier": tpl.get("network_tier", "PREMIUM"), "spot": spot, "tags": tpl.get("tags", ""),
+            "startup_script": script, "run_once": True,
+            "auto_ip": bool(base["auto_ip"]) if base else True,
+            "auto_start": bool(base["auto_start"]) if base else spot,
+            "check_port": int(base["check_port"] if base else tpl.get("check_port") or 22),
+            "note": f"自动替补 {base['name']}" if base else "按替补模板新建",
+        }
+        inst = self.create_instance(acc["id"], data)
+        cfg = {
+            "auto_replace": True,
+            "grp": (base or {}).get("grp") or tpl.get("grp") or "",
+            "ip_mode": (base or {}).get("ip_mode") or tpl.get("ip_mode") or "static",
+        }
+        if base and base.get("dns_record"):
+            cfg |= {"dns_zone_id": base.get("dns_zone_id", ""), "dns_record": base["dns_record"]}
+        if cfg["ip_mode"] not in ("ephemeral", "static"):
+            cfg["ip_mode"] = "static"
+        self.db.update_instance(inst["id"], traffic_token=token)
+        inst = self.db.update_instance_config(inst["id"], cfg)
+        if inst.get("dns_record") and inst.get("external_ip"):
+            self._update_dns(inst, inst["external_ip"])
+        return inst
+
+    def _try_create(self, accounts: list[dict], settings: dict, base: dict | None) -> tuple[dict | None, list[str]]:
+        errors: list[str] = []
+        for acc in accounts:
+            try:
+                return self._create_from_template(acc, settings, base), errors
+            except ManagerError as e:
+                errors.append(f"{acc['name']}：{e}")
+                self._event(None, "replace", f"[{acc['name']}] 按模板新建失败：{e}，尝试下一个账号", "warn")
+                if self._is_account_fatal(e):
+                    self._acct_fails[acc["id"]] = self._acct_fails.get(acc["id"], 0) + 1
+        return None, errors
+
+    def create_from_template(self) -> dict:
+        """手动：按替补模板在第一个有空位的账号新建一台（用于首次开满或测试模板）。"""
+        settings = self.db.get_settings()
+        with self._replace_lock:
+            accounts = self._candidate_accounts(settings)
+            if not accounts:
+                raise ManagerError(f"没有可用的 GCP 账号（都已开满 {settings.get('replace_max_per_account', 3)} 台或已被封）")
+            inst, errors = self._try_create(accounts, settings, None)
+            if not inst:
+                raise ManagerError("所有可用账号都创建失败：" + "；".join(errors)[:800])
+            return inst
+
+    def replace_cycle(self, settings: dict | None = None) -> None:
+        settings = settings or self.db.get_settings()
+        if not settings.get("replace_enabled"):
+            return
+        with self._replace_lock:
+            # 1) 逐个账号同步：发现账号被封、实例被删除
+            for acc in self._gcp_accounts():
+                if acc["status"] == "banned":
+                    continue
+                try:
+                    self.sync_account(acc["id"])
+                    self._acct_fails.pop(acc["id"], None)
+                except GCPError as e:
+                    if not self._is_account_fatal(e):
+                        log.warning("同步账号 %s 失败（不判定为被封）：%s", acc["name"], e)
+                        continue
+                    n = self._acct_fails.get(acc["id"], 0) + 1
+                    self._acct_fails[acc["id"]] = n
+                    if n < self.ACCOUNT_FAIL_LIMIT:
+                        self._event(None, "replace", f"[{acc['name']}] 账号访问失败（{n}/{self.ACCOUNT_FAIL_LIMIT}）：{str(e)[:300]}", "warn")
+                        continue
+                    self.db.set_account_status(acc["id"], "banned", str(e))
+                    self._event(None, "replace", f"账号 {acc['name']} 判定为被封/停用：{str(e)[:300]}", "error", notify=True)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("同步账号 %s 出错：%s", acc["name"], e)
+            # 2) 找出需要替补的实例
+            todo: list[tuple[dict, str]] = []
+            for inst in self.db.list_instances():
+                if inst["provider"] != "gcp" or not inst.get("auto_replace"):
+                    continue
+                if inst["status"] == "SUSPENDED" and inst["account_status"] != "banned":
+                    n = self._suspended_seen.get(inst["id"], 0) + 1
+                    self._suspended_seen[inst["id"]] = n
+                    if n >= 2:
+                        todo.append((inst, "实例被挂起"))
+                    continue
+                self._suspended_seen.pop(inst["id"], None)
+                if inst["account_status"] == "banned":
+                    todo.append((inst, "账号被封"))
+                elif inst["status"] == "LOST":
+                    todo.append((inst, "实例被删除"))
+            # 3) 逐个替补
+            limit = int(settings.get("replace_max_per_day", 6))
+            for old, reason in todo:
+                if self.db.count_type_since("replace_new", time.time() - 86400) >= limit:
+                    if -1 not in self._replace_warned:
+                        self._replace_warned.add(-1)
+                        self._event(None, "replace", f"24 小时内已自动替补 {limit} 台，达到上限，暂停替补", "error", notify=True)
+                    return
+                self._replace_warned.discard(-1)
+                self._replace_one(old, reason, settings)
+
+    def _replace_one(self, old: dict, reason: str, settings: dict) -> None:
+        accounts = self._candidate_accounts(settings, after_id=old["account_id"], exclude=old["account_id"])
+        if not accounts:
+            if old["id"] not in self._replace_warned:
+                self._replace_warned.add(old["id"])
+                self._event(old, "replace", f"需要替补（{reason}），但没有可用的 GCP 账号（都已开满或被封），请添加新账号", "error", notify=True)
+            return
+        new, errors = self._try_create(accounts, settings, old)
+        if not new:
+            if old["id"] not in self._replace_warned:
+                self._replace_warned.add(old["id"])
+                self._event(old, "replace", f"替补失败（{reason}）：所有可用账号都创建失败。{'；'.join(errors)[:600]}", "error", notify=True)
+            return
+        self._replace_warned.discard(old["id"])
+        msg = (f"自动替补：{old['name']}（{old['account_name']}，{reason}，旧 IP {old['external_ip'] or '-'}）"
+               f" → {new['name']}（{new['account_name']}，IP {new['external_ip'] or '-'}）")
+        self.db.add_event("replace_new", msg, new["id"], "warn")
+        send_telegram(self.db.get_settings(), f"GCP-VM {msg}")
+        log.warning(msg)
+        if reason == "实例被挂起":
+            try:
+                self._client(old["account_id"]).delete_instance(old["zone"], old["name"])
+            except GCPError as e:
+                self._event(old, "replace", f"删除被挂起的旧实例失败：{e}", "warn")
+        self._suspended_seen.pop(old["id"], None)
+        self.db.delete_instance(old["id"])
+
+    def reset_account_status(self, account_id: int) -> None:
+        acc = self.db.get_account(account_id, with_key=False)
+        if not acc:
+            raise ManagerError("账号不存在")
+        self.db.set_account_status(account_id, "ok", "")
+        self._acct_fails.pop(account_id, None)
+        self._event(None, "account", f"账号 {acc['name']} 已解除「被封」标记")
 
     # ---------------- remote exec (SSH) ----------------
     @staticmethod
@@ -739,6 +1033,8 @@ class Manager:
                             "或在账号页用 root 密码重新接入"
                         ) from e
                     raise
+            elif inst.get("provider") == "azure":
+                code = self._exec_azure(job, inst, script, timeout)
             else:
                 job.append(f"[gcpvm] 连接 {self.ssh_key.user}@{inst['external_ip']}…\n")
                 added = self.ensure_ssh_key(inst)
@@ -766,9 +1062,42 @@ class Manager:
             job.finish("failed", error=str(e))
             self._event(inst, "exec", f"执行命令（{first_line}）出错：{e}", "error")
 
+    def _azure_install_key(self, inst: dict, job: Job | None = None) -> None:
+        """通过 Azure「运行命令」把面板公钥写入 root（不依赖 SSH，首次约 30-60 秒）。"""
+        if job:
+            job.append("[gcpvm] 通过 Azure「运行命令」写入面板公钥（约 30-60 秒）…\n")
+        client = self._client(inst["account_id"])
+        try:
+            out = client.run_command(inst["project"], inst["name"], az.root_key_script(self.ssh_key.authorized_keys_line()))
+        except GCPError as e:
+            raise ManagerError(f"写入面板公钥失败：{e}") from e
+        if "gcpvm-key-ok" not in out:
+            raise ManagerError(f"写入面板公钥失败：{out[-300:] or '运行命令没有输出'}")
+        self.db.update_instance(inst["id"], ssh_user="root")
+        self._event(inst, "exec", "已通过 Azure 运行命令写入面板 SSH 公钥（root）")
+
+    def _exec_azure(self, job: Job, inst: dict, script: str, timeout: int) -> int:
+        ip = inst["external_ip"]
+        if not inst.get("ssh_user"):
+            self._azure_install_key(inst, job)
+        job.append(f"[gcpvm] 连接 root@{ip}…\n")
+        run = lambda wait: self.ssh_runner(  # noqa: E731
+            ip, script, self.ssh_key.private_path, job.append, user="root", port=22,
+            timeout=timeout, auth_wait=wait, cancelled=lambda: job.cancelled,
+        )
+        try:
+            return run(5)
+        except RemoteError as e:
+            if "认证失败" not in str(e) or job.cancelled:
+                if "无法连接" in str(e):
+                    raise RemoteError(f"{e}（Azure 需在网络安全组放行 22 端口）") from e
+                raise
+        self._azure_install_key(inst, job)
+        return run(30)
+
     # ---------------- startup script ----------------
     def get_startup_script(self, instance_id: int) -> dict:
-        inst = self._gcp_instance(instance_id)
+        inst = self._only_gcp(instance_id)
         meta = self._client(inst["account_id"]).get_metadata(inst["zone"], inst["name"])
         script, run_once = unwrap_startup_script(meta.get("startup-script", ""))
         return {"script": script, "run_once": run_once, "has_script": bool(script)}
@@ -777,7 +1106,7 @@ class Manager:
         self, instance_id: int, script: str, run_once: bool = True, reboot: bool = False
     ) -> dict:
         script = self._check_script(script)
-        inst = self._gcp_instance(instance_id)
+        inst = self._only_gcp(instance_id)
         lock = self._lock_for(instance_id)
         if not lock.acquire(timeout=1):
             raise ManagerError("该实例正在执行其他操作，请稍后")
@@ -804,14 +1133,14 @@ class Manager:
             lock.release()
 
     def clear_startup_script(self, instance_id: int) -> None:
-        inst = self._gcp_instance(instance_id)
+        inst = self._only_gcp(instance_id)
         self._client(inst["account_id"]).set_metadata(
             inst["zone"], inst["name"], {"startup-script": None}
         )
         self._event(inst, "startup", "已清除启动脚本")
 
     def serial_log(self, instance_id: int, start: int | None = None, only_startup: bool = True) -> dict:
-        inst = self._gcp_instance(instance_id)
+        inst = self._only_gcp(instance_id)
         data = self._client(inst["account_id"]).get_serial_output(inst["zone"], inst["name"], start)
         contents = data.get("contents", "")
         if only_startup:
@@ -819,14 +1148,16 @@ class Manager:
         return {"contents": contents, "next": int(data.get("next", 0) or 0)}
 
     # ---------------- firewall ----------------
-    def _account_client(self, account_id: int) -> tuple[dict, GCPClient]:
+    def _account_client(self, account_id: int, gcp_only: bool = False) -> tuple[dict, GCPClient]:
         acc = self.db.get_account(account_id, with_key=False)
-        if not acc:
+        if not acc or acc.get("kind") == "manual":
             raise ManagerError("账号不存在")
+        if gcp_only and acc.get("kind") == "azure":
+            raise ManagerError("Azure 账号的防火墙请在 Azure 门户的「网络安全组」管理（面板新建的实例默认放行全部入站）")
         return acc, self._client(account_id)
 
     def list_firewalls(self, account_id: int) -> dict:
-        _, client = self._account_client(account_id)
+        _, client = self._account_client(account_id, gcp_only=True)
         try:
             rules = [summarize(r) for r in client.list_firewalls()]
             networks = client.list_networks()
@@ -836,7 +1167,7 @@ class Manager:
         return {"rules": rules, "networks": networks}
 
     def create_firewall(self, account_id: int, data: dict) -> None:
-        acc, client = self._account_client(account_id)
+        acc, client = self._account_client(account_id, gcp_only=True)
         body = build_body(data)
         try:
             client.create_firewall(body)
@@ -848,7 +1179,7 @@ class Manager:
         self._event(None, "firewall", f"[{acc['name']}] 新建防火墙规则 {body['name']}：{s['direction']} {s['action']} {s['rules']} 来自 {s['ranges']}", "warn")
 
     def set_firewall_disabled(self, account_id: int, name: str, disabled: bool) -> None:
-        acc, client = self._account_client(account_id)
+        acc, client = self._account_client(account_id, gcp_only=True)
         try:
             client.patch_firewall(name, {"disabled": bool(disabled)})
         except GCPError as e:
@@ -856,7 +1187,7 @@ class Manager:
         self._event(None, "firewall", f"[{acc['name']}] {'禁用' if disabled else '启用'}防火墙规则 {name}")
 
     def delete_firewall(self, account_id: int, name: str) -> None:
-        acc, client = self._account_client(account_id)
+        acc, client = self._account_client(account_id, gcp_only=True)
         try:
             client.delete_firewall(name)
         except GCPError as e:
@@ -865,21 +1196,33 @@ class Manager:
 
     # ---------------- create / delete instance ----------------
     def create_options(self, account_id: int) -> dict:
-        _, client = self._account_client(account_id)
+        acc, client = self._account_client(account_id)
+        if acc.get("kind") == "azure":
+            try:
+                zones = az.sort_locations(client.list_zones())
+            except GCPError as e:
+                raise ManagerError(str(e)) from e
+            return {
+                "provider": "azure", "zones": zones, "networks": [], "default_zone": "japaneast",
+                "images": [{"id": i["id"], "label": i["label"]} for i in az.IMAGES],
+                "disk_types": list(az.DISK_TYPES), "default_disk_gb": 30, "default_machine_type": "Standard_B2s",
+            }
         try:
             zones = sort_zones(client.list_zones())
             networks = client.list_networks()
         except GCPError as e:
             raise ManagerError(str(e)) from e
         return {
-            "zones": zones,
-            "networks": networks,
+            "provider": "gcp", "zones": zones, "networks": networks, "default_zone": "asia-east1-b",
             "images": [{"id": i["id"], "label": i["label"]} for i in IMAGES],
+            "disk_types": ["pd-balanced", "pd-standard", "pd-ssd"], "default_disk_gb": 20, "default_machine_type": "e2-small",
         }
 
     def machine_types(self, account_id: int, zone: str) -> list[dict]:
-        _, client = self._account_client(account_id)
+        acc, client = self._account_client(account_id)
         try:
+            if acc.get("kind") == "azure":
+                return az.filter_sizes(client.list_machine_types(zone), zone)
             return filter_machine_types(client.list_machine_types(zone))
         except GCPError as e:
             raise ManagerError(str(e)) from e
@@ -891,6 +1234,8 @@ class Manager:
             return "实例名称已存在，请换一个名称"
         if "ZONE_RESOURCE_POOL_EXHAUSTED" in msg or "does not have enough resources" in msg:
             return "该可用区暂时没有足够资源，请换一个可用区或机型后重试"
+        if "SkuNotAvailable" in msg or "NotAvailableForSubscription" in msg:
+            return "该区域暂时不提供这个机型（或订阅不可用），请换区域或机型。原始错误：" + msg
         if "QUOTA" in msg.upper() or "Quota" in msg:
             return (
                 "超出 GCP 配额（例如该区域或全部区域的 vCPU 数、外网 IP 数）。"
@@ -898,8 +1243,54 @@ class Manager:
             )
         return msg
 
+    def _create_azure(self, acc: dict, client, data: dict, cfg: dict) -> dict:
+        script = str(data.get("startup_script") or "").replace("\r\n", "\n")
+        if script.strip():
+            self._check_script(script)
+        # customData 由 cloud-init 在首次开机时执行一次：先写入面板公钥（root），再执行用户脚本
+        custom = "#!/bin/bash\n" + az.root_key_script(self.ssh_key.authorized_keys_line()) + "\n" + script
+        try:
+            loc, _ = az.build_vm_body(data, self.ssh_key.ensure(), "x", "x", custom)  # 先校验参数
+        except ValueError as e:
+            raise ManagerError(str(e)) from e
+        name, rg = data["name"].strip(), f"{az.PREFIX}{loc}"
+        try:
+            subnet, nsg = client.ensure_network(rg, loc)
+            _, body = az.build_vm_body(data, self.ssh_key.ensure(), subnet, nsg, custom)
+            client.insert_instance(rg, name, body)
+        except GCPError as e:
+            self._event(None, "create", f"[{acc['name']}] 创建实例 {name} 失败：{self._explain_create(e)}", "error")
+            raise ManagerError(self._explain_create(e)) from e
+        self.sync_account(acc["id"])
+        inst = next(
+            (i for i in self.db.list_instances()
+             if i["account_id"] == acc["id"] and i["name"] == name and i["project"].lower() == rg.lower()),
+            None,
+        )
+        if not inst:
+            raise ManagerError("实例已创建，但同步时未找到，请稍后点「从 GCP 同步」")
+        cfg = {k: v for k, v in cfg.items() if k != "ip_mode"}
+        self.db.update_instance(inst["id"], ssh_user="root")
+        inst = self.db.update_instance_config(inst["id"], cfg)
+        self._event(
+            inst, "create",
+            f"新建 Azure 实例：{loc} · {data['machine_type']}{' · Spot' if data.get('spot') else ''}，IP {inst['external_ip'] or '-'}",
+            notify=True,
+        )
+        return inst
+
     def create_instance(self, account_id: int, data: dict) -> dict:
         acc, client = self._account_client(account_id)
+        if acc.get("kind") == "azure":
+            cfg = {
+                "auto_ip": bool(data.get("auto_ip", True)),
+                "auto_start": bool(data.get("auto_start", bool(data.get("spot")))),
+                "check_port": int(data.get("check_port") or 22),
+                "note": str(data.get("note") or "")[:200],
+            }
+            if not 1 <= cfg["check_port"] <= 65535:
+                raise ManagerError("检测端口范围 1-65535")
+            return self._create_azure(acc, client, data, cfg)
         script = str(data.get("startup_script") or "").replace("\r\n", "\n")
         startup = ""
         if script.strip():
@@ -936,11 +1327,19 @@ class Manager:
         return inst
 
     def delete_instance(self, instance_id: int) -> None:
+        raw = self._instance(instance_id)
+        if raw.get("status") == "LOST" or raw.get("account_status") == "banned":
+            self._event(raw, "delete", "已删除记录（云端实例已不存在或账号已被封）", "warn")
+            self.db.delete_instance(instance_id)
+            return
         inst = self._gcp_instance(instance_id)
         lock = self._lock_for(instance_id)
         if not lock.acquire(timeout=1):
             raise ManagerError("该实例正在执行其他操作，请稍后")
         try:
+            if inst.get("provider") == "azure":
+                self._delete_azure(inst)
+                return
             client = self._client(inst["account_id"])
             region = region_of(inst["zone"])
             addr = None
@@ -968,6 +1367,17 @@ class Manager:
             self.db.delete_instance(instance_id)
         finally:
             lock.release()
+
+    def _delete_azure(self, inst: dict) -> None:
+        client = self._client(inst["account_id"])
+        try:
+            cleaned = client.delete_instance(inst["project"], inst["name"])
+        except GCPError as e:
+            self._event(inst, "delete", f"删除实例失败：{e}", "error")
+            raise ManagerError(str(e)) from e
+        extra = f"，已清理网卡/公网 IP/系统盘（{len(cleaned)} 个资源）" if cleaned else ""
+        self._event(inst, "delete", f"已删除 Azure 实例（{inst['zone']}，IP {inst['external_ip'] or '-'}）{extra}", "warn", notify=True)
+        self.db.delete_instance(inst["id"])
 
     # ---------------- traffic ----------------
     def _traffic_token(self, inst: dict) -> str:

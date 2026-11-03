@@ -83,15 +83,17 @@ const S = {
 const STOPPED = ["TERMINATED", "STOPPED", "SUSPENDED"];
 const STATUS = {
   RUNNING: ["运行中", "ok"], TERMINATED: ["已关机", "idle"], STOPPED: ["已关机", "idle"], STOPPING: ["关机中", "warn"],
-  PROVISIONING: ["创建中", "warn"], STAGING: ["启动中", "warn"], SUSPENDED: ["已挂起", "idle"], SUSPENDING: ["挂起中", "warn"], REPAIRING: ["修复中", "warn"],
+  PROVISIONING: ["创建中", "warn"], LOST: ["云端已不存在", "bad"], UNKNOWN: ["未知", "idle"], STAGING: ["启动中", "warn"], SUSPENDED: ["已挂起", "idle"], SUSPENDING: ["挂起中", "warn"], REPAIRING: ["修复中", "warn"],
 };
 const CN = { ok: ["国内可达", "ok"], blocked: ["疑似被墙", "bad"], down: ["服务不可达", "warn"], unknown: ["未检测", "idle"] };
 const EVT = {
   alert: "服务监控", blocked: "被墙", server: "服务器", create: "新建实例", delete: "删除实例", firewall: "防火墙", exec: "执行命令",
   startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机",
-  check: "检测", dns: "DNS", sync: "同步", account: "账号",
+  check: "检测", dns: "DNS", sync: "同步", account: "账号", replace: "自动替补", replace_new: "替补完成",
 };
 const isManual = (i) => i.provider === "manual";
+const isAzure = (i) => i.provider === "azure";
+const isGone = (i) => i.status === "LOST" || i.account_status === "banned";
 const byId = (id) => S.instances.find((x) => x.id === +id);
 
 function statusOf(i) {
@@ -110,6 +112,8 @@ function svcOf(i) {
 function issuesOf(i) {
   const out = [];
   const r = S.rates[i.id];
+  if (i.account_status === "banned") return [["bad", "账号被封", `${i.account_name} 已判定为被封/停用${i.auto_replace ? "，等待自动替补" : ""}`]];
+  if (i.status === "LOST") return [["bad", "实例已不存在", `云端找不到该实例${i.auto_replace ? "，等待自动替补" : ""}`]];
   if (i.cn_state === "blocked") out.push(["bad", "疑似被墙", `${i.external_ip}:${i.check_port} 国内不可达 · 连续 ${i.fail_count} 次${isManual(i) ? " · 需手动换 IP" : ""}`]);
   else if (i.cn_state === "down") out.push(["warn", "服务不可达", `${i.external_ip}:${i.check_port} 国内外都不通`]);
   if (!isManual(i) && STOPPED.includes(i.status)) out.push(["warn", "已关机", i.auto_start ? "等待自动开机" : "未开启自动开机"]);
@@ -157,6 +161,7 @@ function route() {
   renderTopbar(v);
   $("#sidebar").classList.remove("open");
   $("#scrim").classList.add("hidden");
+  if (v === "settings") S.sec = sub || "detect";
   ({ overview: loadOverview, instances: loadInstances, firewall: loadFirewall, accounts: loadAccounts, settings: () => loadSettings(sub), events: loadEvents })[v]();
 }
 window.addEventListener("hashchange", route);
@@ -175,7 +180,7 @@ function renderTopbar(v) {
   };
   if (v === "overview" || v === "instances") {
     add(`${icon("radar")}<span class="lbl">立即检测一轮</span>`, "small", (b) => busy(b, async () => toast((await api("/api/run-check", { method: "POST" })).message)));
-    add(`${icon("refresh")}<span class="lbl">从 GCP 同步</span>`, "small", (b) => busy(b, async () => {
+    add(`${icon("refresh")}<span class="lbl">同步云实例</span>`, "small", (b) => busy(b, async () => {
       const r = await api("/api/sync", { method: "POST" });
       S.instances = r.instances;
       renderAll();
@@ -338,7 +343,8 @@ $("#ov-issues").addEventListener("click", (e) => { const b = e.target.closest("[
 function filtered() {
   const q = $("#inst-search").value.trim().toLowerCase();
   return S.instances.filter((i) => {
-    if (S.filter === "gcp" && isManual(i)) return false;
+    if (S.filter === "gcp" && i.provider !== "gcp") return false;
+    if (S.filter === "azure" && !isAzure(i)) return false;
     if (S.filter === "manual" && !isManual(i)) return false;
     if (S.filter === "issue" && !issuesOf(i).length) return false;
     if (!q) return true;
@@ -355,10 +361,11 @@ function rateCell(i) {
 }
 function renderInstances() {
   const all = S.instances;
-  const counts = { all: all.length, gcp: all.filter((i) => !isManual(i)).length, manual: all.filter(isManual).length, issue: all.filter((i) => issuesOf(i).length).length };
+  const counts = { all: all.length, gcp: all.filter((i) => i.provider === "gcp").length, azure: all.filter(isAzure).length, manual: all.filter(isManual).length, issue: all.filter((i) => issuesOf(i).length).length };
   $$("#inst-filter button").forEach((b) => {
     b.classList.toggle("on", b.dataset.f === S.filter);
-    b.innerHTML = `${{ all: "全部", gcp: "GCP", manual: "自有", issue: "异常" }[b.dataset.f]}<span class="n">${counts[b.dataset.f]}</span>`;
+    b.innerHTML = `${{ all: "全部", gcp: "GCP", azure: "Azure", manual: "自有", issue: "异常" }[b.dataset.f]}<span class="n">${counts[b.dataset.f]}</span>`;
+    b.classList.toggle("hidden", b.dataset.f === "azure" && !counts.azure);
   });
   const list = filtered();
   const empty = $("#inst-empty");
@@ -368,19 +375,21 @@ function renderInstances() {
     const [st, stc] = statusOf(i);
     const [cn, cnc] = CN[i.cn_state] || CN.unknown;
     const manual = isManual(i);
-    const running = manual || i.status === "RUNNING";
-    const sub = manual ? `自有服务器 · SSH ${esc(i.ssh_user || "root")}:${i.ssh_port || 22}` : `${esc(i.zone)} · ${esc(i.machine_type)}${i.preemptible ? " · Spot" : ""}`;
+    const gone = isGone(i);
+    const running = !gone && (manual || i.status === "RUNNING");
+    const sub = manual ? `自有服务器 · SSH ${esc(i.ssh_user || "root")}:${i.ssh_port || 22}`
+      : `${isAzure(i) ? "Azure · " : ""}${esc(i.zone)} · ${esc(i.machine_type)}${i.preemptible ? " · Spot" : ""}`;
     return `<tr class="click${drawerId === i.id ? " sel" : ""}" data-id="${i.id}">
       <td data-l="实例"><div><div class="name">${esc(i.name)}</div><div class="sub">${sub}</div></div></td>
       <td data-l="IP"><span class="ip" data-copy="${esc(i.external_ip)}" title="点击复制">${esc(i.external_ip) || "<span class='muted'>无外网 IP</span>"}</span></td>
-      <td data-l="状态"><span class="badge ${stc}" data-st="${i.id}">${st}</span></td>
+      <td data-l="状态"><span class="badge ${i.account_status === "banned" ? "bad" : stc}" data-st="${i.id}">${i.account_status === "banned" ? "账号被封" : st}</span></td>
       <td data-l="国内"><span class="badge ${cnc}" title="上次检测 ${fmtTime(i.last_check)}">${cn}${i.cn_state === "blocked" ? ` ${i.fail_count}` : ""}</span></td>
       <td data-l="速率"><div style="display:flex;align-items:center;gap:10px"><svg class="spark" data-id="${i.id}" viewBox="0 0 92 26" preserveAspectRatio="none" aria-hidden="true"></svg><div data-rate="${i.id}">${rateCell(i)}</div></div></td>
-      <td data-l="分组"><div class="tags">${i.grp ? `<span class="tag on">${esc(i.grp)}</span>` : `<span class="muted small">-</span>`}${!manual && i.auto_ip ? `<span class="tag" title="被墙自动换 IP">自动换 IP</span>` : ""}</div></td>
+      <td data-l="分组"><div class="tags">${i.grp ? `<span class="tag on">${esc(i.grp)}</span>` : `<span class="muted small">-</span>`}${!manual && i.auto_ip ? `<span class="tag" title="被墙自动换 IP">自动换 IP</span>` : ""}${i.auto_replace ? `<span class="tag" title="账号被封 / 实例被删除时自动替补">自动替补</span>` : ""}</div></td>
       <td><div class="ops">
         ${running ? `<button class="btn small ghost" data-act="check">检测</button>` : ""}
-        ${!manual && i.status === "RUNNING" ? `<button class="btn small ghost danger" data-act="change_ip">换 IP</button>` : ""}
-        ${!manual && STOPPED.includes(i.status) ? `<button class="btn small primary" data-act="start">开机</button>` : ""}
+        ${!manual && !gone && i.status === "RUNNING" ? `<button class="btn small ghost danger" data-act="change_ip">换 IP</button>` : ""}
+        ${!manual && !gone && STOPPED.includes(i.status) ? `<button class="btn small primary" data-act="start">开机</button>` : ""}
         <button class="btn small" data-act="open">管理</button>
       </div></td></tr>`;
   }).join("");
@@ -388,7 +397,7 @@ function renderInstances() {
 }
 function updateRateCells() {
   $$("#inst-table [data-rate]").forEach((el) => { const i = byId(el.dataset.rate); if (i) el.innerHTML = rateCell(i); });
-  $$("#inst-table [data-st]").forEach((el) => { const i = byId(el.dataset.st); if (i) { const [st, c] = statusOf(i); el.textContent = st; el.className = `badge ${c}`; } });
+  $$("#inst-table [data-st]").forEach((el) => { const i = byId(el.dataset.st); if (i && i.account_status !== "banned") { const [st, c] = statusOf(i); el.textContent = st; el.className = `badge ${c}`; } });
   $$("#inst-table svg.spark").forEach((svg) => drawChart(svg, (S.instHist[svg.dataset.id] || []).slice(-30)));
 }
 $("#inst-filter").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { S.filter = b.dataset.f; renderInstances(); } });
@@ -474,24 +483,34 @@ function renderDrawer() {
   const [cn, cnc] = CN[i.cn_state] || CN.unknown;
   $("#d-badges").innerHTML = `<span class="badge ${stc}">${st}</span><span class="badge ${cnc}">${cn}</span>`;
   const acts = [];
-  if (!manual && STOPPED.includes(i.status)) acts.push(["start", "开机", "primary"]);
-  if (!manual && i.status === "RUNNING") acts.push(["stop", "关机", ""], ["reset", "重启", ""]);
-  if (manual || i.status === "RUNNING") acts.push(["check", "检测", ""]);
-  if (!manual && i.status === "RUNNING") acts.push(["change_ip", "换 IP", "danger"]);
-  acts.push(["exec", "执行命令", "ghost"]);
+  const gone = isGone(i);
+  if (!gone) {
+    if (!manual && STOPPED.includes(i.status)) acts.push(["start", "开机", "primary"]);
+    if (!manual && i.status === "RUNNING") acts.push(["stop", "关机", ""], ["reset", "重启", ""]);
+    if (manual || i.status === "RUNNING") acts.push(["check", "检测", ""]);
+    if (!manual && i.status === "RUNNING") acts.push(["change_ip", "换 IP", "danger"]);
+    acts.push(["exec", "执行命令", "ghost"]);
+  }
   $("#d-actions").innerHTML = acts.map(([a, l, c]) => `<button class="btn small ${c}" data-dact="${a}">${l}</button>`).join("");
   const kv = manual ? [
     ["类型", "自有服务器"], ["SSH", `${i.ssh_user || "root"} · 端口 ${i.ssh_port || 22}`], ["检测端口", i.check_port],
     ["被墙检测", i.auto_ip ? "开（被墙通知，需手动换 IP）" : "关"], ["分组", i.grp || "-"], ["上次检测", fmtTime(i.last_check)], ["备注", i.note || "-"],
+  ] : isAzure(i) ? [
+    ["类型", "Azure"], ["区域", i.zone], ["资源组", i.project], ["机型", `${i.machine_type}${i.preemptible ? " · Spot" : ""}`],
+    ["内网 IP", i.internal_ip || "-"], ["IP 类型", "Standard 静态公网 IP"], ["检测端口", i.check_port],
+    ["自动换 IP", i.auto_ip ? "开" : "关"], ["自动开机", i.auto_start ? "开" : "关"], ["分组", i.grp || "-"],
+    ["上次检测", fmtTime(i.last_check)], ["上次换 IP", fmtTime(i.last_change_at)], ["账号", i.account_name], ["备注", i.note || "-"],
   ] : [
     ["区域", i.zone], ["机型", `${i.machine_type}${i.preemptible ? " · Spot" : ""}`], ["内网 IP", i.internal_ip || "-"],
     ["IP 类型", i.ip_mode === "static" ? "静态 IP" : "临时 IP"], ["网络层级", i.network_tier || "-"], ["检测端口", i.check_port],
-    ["自动换 IP", i.auto_ip ? "开" : "关"], ["自动开机", i.auto_start ? "开" : "关"], ["分组", i.grp || "-"],
+    ["自动换 IP", i.auto_ip ? "开" : "关"], ["自动开机", i.auto_start ? "开" : "关"], ["自动替补", i.auto_replace ? "开" : "关"], ["分组", i.grp || "-"],
     ["上次检测", fmtTime(i.last_check)], ["上次换 IP", fmtTime(i.last_change_at)], ["项目", i.account_name], ["备注", i.note || "-"],
   ];
   $("#d-kv").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
-  $("#sub-startup-btn").classList.toggle("hidden", manual);
-  $("#exec-note").innerHTML = manual
+  $("#sub-startup-btn").classList.toggle("hidden", i.provider !== "gcp");
+  $("#exec-note").innerHTML = isAzure(i)
+    ? `以 root 身份通过 SSH 执行 bash 脚本。首次执行会通过 Azure「运行命令」自动写入面板公钥（约 30-60 秒），需要网络安全组放行 22 端口（面板新建的实例默认全部放行）。`
+    : manual
     ? `以 ${esc(i.ssh_user || "root")} 身份通过 SSH（端口 ${i.ssh_port || 22}）执行 bash 脚本。需要先在服务器上执行过一次「接入命令」（设置页复制），或添加时填写了 root 密码。`
     : `以 root 身份在实例上执行 bash 脚本并实时显示输出。首次执行会自动写入面板公钥（用户 <code>gcpvm</code>），需要防火墙放行 22 端口。`;
   renderDrawerLive();
@@ -682,10 +701,14 @@ function fillConfig(inst) {
   $("#manual-fields").classList.toggle("hidden", !manual);
   $("#gcp-fields").classList.toggle("hidden", manual);
   $("#gcp-fields-2").classList.toggle("hidden", manual);
+  $("#replace-field").classList.toggle("hidden", inst.provider !== "gcp");
+  $("#ipmode-field").classList.toggle("hidden", inst.provider !== "gcp");
+  f.auto_replace.checked = !!inst.auto_replace;
   $("#auto-ip-label").textContent = manual ? "被墙检测并通知（自有服务器无法自动换 IP）" : "被墙自动更换 IP";
-  $("#danger-title").textContent = manual ? "从面板移除" : "删除实例";
-  $("#danger-desc").textContent = manual ? "只是从面板移除，不影响服务器本身" : "实例和启动盘中的数据将无法恢复";
-  $("#inst-delete").textContent = manual ? "移除" : "删除";
+  const gone = isGone(inst);
+  $("#danger-title").textContent = manual || gone ? "从面板移除" : "删除实例";
+  $("#danger-desc").textContent = manual ? "只是从面板移除，不影响服务器本身" : gone ? "云端实例已不存在或账号被封，只删除面板记录（也会停止对它的替补）" : "实例和启动盘中的数据将无法恢复";
+  $("#inst-delete").textContent = manual || gone ? "移除" : "删除";
   if (manual) {
     f.m_name.value = inst.name; f.m_ip.value = inst.external_ip || "";
     f.m_ssh_port.value = inst.ssh_port || 22; f.m_ssh_user.value = inst.ssh_user || "root";
@@ -703,7 +726,8 @@ $("#inst-form").addEventListener("submit", async (e) => {
       await api(`/api/instances/${inst.id}`, {
         method: "PATCH",
         body: {
-          auto_ip: f.auto_ip.checked, auto_start: f.auto_start.checked, check_port: +f.check_port.value, ip_mode: f.ip_mode.value,
+          auto_ip: f.auto_ip.checked, auto_start: f.auto_start.checked, check_port: +f.check_port.value,
+          ...(inst.provider === "gcp" ? { ip_mode: f.ip_mode.value, auto_replace: f.auto_replace.checked } : {}),
           dns_zone_id: f.dns_zone_id.value.trim(), dns_record: f.dns_record.value.trim(), note: f.note.value.trim(), grp: f.grp.value.trim(),
         },
       });
@@ -736,17 +760,32 @@ function defaultName() {
   const d = new Date();
   return `vm-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
+const DISK_LABELS = {
+  "pd-balanced": "平衡型 pd-balanced（推荐）", "pd-standard": "标准型 pd-standard", "pd-ssd": "SSD pd-ssd",
+  StandardSSD_LRS: "标准 SSD（推荐）", Standard_LRS: "标准 HDD", Premium_LRS: "高级 SSD",
+};
+let createOpts = null;
 async function loadCreateOptions() {
   const f = $("#create-form");
   f.zone.innerHTML = `<option value="">加载中…</option>`;
-  const opts = await api(`/api/accounts/${f.account.value}/create-options`);
+  const opts = (createOpts = await api(`/api/accounts/${f.account.value}/create-options`));
+  const azure = opts.provider === "azure";
+  $("#tier-field").classList.toggle("hidden", azure);
+  $("#tags-field").classList.toggle("hidden", azure);
+  f.disk_type.innerHTML = opts.disk_types.map((d) => `<option value="${d}">${esc(DISK_LABELS[d] || d)}</option>`).join("");
+  f.disk_size_gb.min = azure ? 30 : 10;
+  f.disk_size_gb.value = Math.max(+f.disk_size_gb.value || 0, opts.default_disk_gb);
+  if (!azure && +f.disk_size_gb.value === 30) f.disk_size_gb.value = 20;
+  $("#create-note").textContent = azure
+    ? "自动创建资源组 gcpvm-区域、虚拟网络和放行全部入站的安全组；公网 IP 为 Standard 静态 IP。面板公钥在首次开机时写入 root。"
+    : "面板 SSH 公钥会在创建时写入，建好即可执行命令。不附加服务账号。";
   const groups = {};
   opts.zones.forEach((z) => (groups[z.region] = groups[z.region] || []).push(z));
   f.zone.innerHTML = Object.entries(groups).map(([r, zs]) => {
     const label = zs[0].label.includes(" · ") ? `${zs[0].label.split(" · ")[0]}（${r}）` : r;
     return `<optgroup label="${esc(label)}">${zs.map((z) => `<option value="${esc(z.name)}">${esc(z.name)}</option>`).join("")}</optgroup>`;
   }).join("");
-  const pref = opts.zones.find((z) => z.name === "asia-northeast1-a") || opts.zones[0];
+  const pref = opts.zones.find((z) => z.name === opts.default_zone) || opts.zones[0];
   if (pref) f.zone.value = pref.name;
   f.image.innerHTML = opts.images.map((i) => `<option value="${esc(i.id)}">${esc(i.label)}</option>`).join("");
   await loadMachineTypes();
@@ -758,10 +797,12 @@ async function loadMachineTypes() {
   try {
     const types = await api(`/api/accounts/${f.account.value}/machine-types?zone=${encodeURIComponent(f.zone.value)}`);
     const fams = {};
-    types.forEach((m) => (fams[m.name.split("-")[0]] = fams[m.name.split("-")[0]] || []).push(m));
+    const famOf = (m) => m.family || m.name.split("-")[0];
+    types.forEach((m) => (fams[famOf(m)] = fams[famOf(m)] || []).push(m));
     f.machine_type.innerHTML = Object.entries(fams).map(([fam, ms]) =>
       `<optgroup label="${esc(fam.toUpperCase())}">${ms.map((m) => `<option value="${esc(m.name)}">${esc(m.label)}</option>`).join("")}</optgroup>`).join("");
-    const want = types.find((m) => m.name === prev) || types.find((m) => m.name === "e2-small") || types[0];
+    const def = createOpts ? createOpts.default_machine_type : "e2-small";
+    const want = types.find((m) => m.name === prev) || types.find((m) => m.name === def) || types[0];
     if (want) f.machine_type.value = want.name;
   } catch (e) { f.machine_type.innerHTML = `<option value="">加载失败</option>`; toast(e.message, true); }
 }
@@ -769,8 +810,9 @@ async function openCreate(btn) {
   const f = $("#create-form");
   await busy(btn, async () => {
     const accounts = await api("/api/accounts");
-    if (!accounts.length) throw new Error("请先在「账号与服务器」添加 GCP 服务账号");
-    f.account.innerHTML = accounts.map((a) => `<option value="${a.id}">${esc(a.name)}（${esc(a.project_id)}）</option>`).join("");
+    const usable = accounts.filter((a) => a.status !== "banned");
+    if (!usable.length) throw new Error("请先在「账号与服务器」添加 GCP 或 Azure 账号");
+    f.account.innerHTML = usable.map((a) => `<option value="${a.id}">${a.kind === "azure" ? "Azure · " : "GCP · "}${esc(a.name)}（${a.instances} 台）</option>`).join("");
     f.name.value = defaultName();
     $("#create-hint").textContent = "";
     await loadPresets();
@@ -794,7 +836,7 @@ $("#create-form").addEventListener("submit", async (e) => {
     spot: f.spot.checked, auto_ip: f.auto_ip.checked, auto_start: f.auto_start.checked, check_port: +f.check_port.value,
     tags: f.tags.value.trim(), note: f.note.value.trim(), startup_script: f.startup_script.value, run_once: true,
   };
-  $("#create-hint").textContent = "正在创建，通常需要 30-60 秒…";
+  $("#create-hint").textContent = createOpts && createOpts.provider === "azure" ? "正在创建，Azure 通常需要 1-3 分钟…" : "正在创建，通常需要 30-60 秒…";
   await busy($("button[type=submit]", f), async () => {
     try {
       const r = await api(`/api/accounts/${f.account.value}/instances`, { method: "POST", body });
@@ -811,7 +853,7 @@ $("#create-form").addEventListener("submit", async (e) => {
 async function loadFirewall() {
   const sel = $("#fw-account");
   try {
-    const accounts = await api("/api/accounts");
+    const accounts = (await api("/api/accounts")).filter((a) => a.kind === "gcp" && a.status !== "banned");
     const prev = sel.value;
     sel.innerHTML = accounts.map((a) => `<option value="${a.id}">${esc(a.name)}（${esc(a.project_id)}）</option>`).join("");
     if (!accounts.length) { $("#fw-table tbody").innerHTML = `<tr><td colspan="8" class="muted">还没有 GCP 账号，先到「账号与服务器」添加</td></tr>`; return; }
@@ -901,16 +943,50 @@ $("#fw-form").addEventListener("submit", async (e) => {
 async function loadAccounts() {
   try {
     const rows = await api("/api/accounts");
+    const cap = (S.settings && S.settings.replace_max_per_account) || 3;
     $("#accounts-table tbody").innerHTML = rows.length
-      ? rows.map((a) => `<tr><td><div class="name">${esc(a.name)}</div></td><td class="mono small">${esc(a.project_id)}</td><td class="mono small">${esc(a.client_email)}</td>
-          <td class="r"><button class="btn small ghost danger" data-del="${a.id}" data-name="${esc(a.name)}">删除</button></td></tr>`).join("")
-      : `<tr><td colspan="4" class="muted">暂无 GCP 账号</td></tr>`;
+      ? rows.map((a) => `<tr>
+          <td data-l="名称"><div><div class="name">${esc(a.name)}</div><div class="sub mono">${esc(a.client_email)}</div></div></td>
+          <td data-l="类型"><span class="tag ${a.kind === "azure" ? "" : "on"}">${a.kind === "azure" ? "Azure" : "GCP"}</span></td>
+          <td data-l="项目" class="mono small">${esc(a.project_id)}</td>
+          <td data-l="实例">${a.instances}${a.kind === "gcp" ? `<span class="muted"> / ${cap}</span>` : ""}</td>
+          <td data-l="状态">${a.status === "banned"
+            ? `<span class="badge bad" title="${esc(a.status_msg)}">被封 / 停用</span>`
+            : `<span class="badge ok">正常</span>`}</td>
+          <td class="r"><div class="ops">
+            ${a.status === "banned" ? `<button class="btn small ghost" data-reset="${a.id}">解除标记</button>` : ""}
+            <button class="btn small ghost danger" data-del="${a.id}" data-name="${esc(a.name)}">删除</button></div></td></tr>`).join("")
+      : `<tr><td colspan="6" class="muted">暂无云账号</td></tr>`;
   } catch (e) { toast(e.message, true); }
 }
 $("#accounts-table").addEventListener("click", async (e) => {
+  const r = e.target.closest("[data-reset]");
+  if (r) {
+    if (!confirm("确认账号已恢复可用？解除后会重新同步、参与替补。")) return;
+    return busy(r, async () => { await api(`/api/accounts/${r.dataset.reset}/reset-status`, { method: "POST" }); toast("已解除标记"); loadAccounts(); });
+  }
   const b = e.target.closest("[data-del]");
-  if (!b || !confirm(`删除账号「${b.dataset.name}」？其下实例的管理配置也会一并删除（不影响 GCP 上的实例）。`)) return;
+  if (!b || !confirm(`删除账号「${b.dataset.name}」？其下实例的管理配置也会一并删除（不影响云上的实例）。`)) return;
   await busy(b, async () => { await api(`/api/accounts/${b.dataset.del}`, { method: "DELETE" }); toast("已删除"); loadAccounts(); });
+});
+let acctKind = "gcp";
+$("#acct-kind").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  acctKind = b.dataset.k;
+  $$("#acct-kind button").forEach((x) => x.classList.toggle("on", x === b));
+  $$("#account-form [data-kind]").forEach((d) => d.classList.toggle("hidden", d.dataset.kind !== acctKind));
+});
+$("#az-paste").addEventListener("input", (e) => {
+  const f = $("#account-form");
+  try {
+    const j = JSON.parse(e.target.value);
+    if (j.appId) f.client_id.value = j.appId;
+    if (j.password) f.client_secret.value = j.password;
+    if (j.tenant) f.tenant_id.value = j.tenant;
+    if (j.subscriptionId || j.subscription_id) f.subscription_id.value = j.subscriptionId || j.subscription_id;
+    if (j.displayName && !f.name.value) f.name.value = j.displayName;
+  } catch (_) {}
 });
 $("#key-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
@@ -920,9 +996,13 @@ $("#account-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.currentTarget;
   await busy($("button[type=submit]", f), async () => {
-    const acc = await api("/api/accounts", { method: "POST", body: { name: f.name.value.trim(), key: f.key.value.trim() } });
+    const body = acctKind === "azure"
+      ? { kind: "azure", name: f.name.value.trim(), subscription_id: f.subscription_id.value.trim(), tenant_id: f.tenant_id.value.trim(), client_id: f.client_id.value.trim(), client_secret: f.client_secret.value.trim() }
+      : { name: f.name.value.trim(), key: f.key.value.trim() };
+    const acc = await api("/api/accounts", { method: "POST", body });
     toast(`账号 ${acc.name} 添加成功，已同步实例`);
     f.reset();
+    $("#az-paste").value = "";
     loadAccounts();
   });
 });
@@ -1019,12 +1099,17 @@ async function loadSettings(sub) {
     S.pushStatus = Object.fromEntries(push.map((p) => [p.name, p]));
     const f = $("#settings-form");
     for (const [k, v] of Object.entries(s)) {
-      if (k === "probes" || k === "push_probes" || k === "script_presets") continue;
+      if (["probes", "push_probes", "script_presets", "replace_template", "panel_url"].includes(k)) continue;
       if (k === "detect_mode") { $$("[name=detect_mode]", f).forEach((r) => (r.checked = r.value === v)); continue; }
       const el = f.elements[k];
       if (!el || !el.tagName) continue;
       if (el.type === "checkbox") el.checked = !!v; else el.value = v;
     }
+    const tpl = s.replace_template || {};
+    $$("#replace-sec [data-t]").forEach((el) => {
+      const v = tpl[el.dataset.t];
+      if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
+    });
     const pbox = $("#push-probes");
     pbox.innerHTML = "";
     (s.push_probes || []).forEach((p) => pbox.appendChild(pushRow(p)));
@@ -1040,7 +1125,8 @@ async function loadSettings(sub) {
   scrollToSection(sub);
 }
 function scrollToSection(sub) {
-  const sec = sub || "detect";
+  const sec = sub || S.sec || "detect";
+  S.sec = sec;
   $$("#settings-nav a").forEach((a) => a.classList.toggle("on", a.dataset.sec === sec));
   const el = $(`#settings-form .sec[data-sec="${sec}"]`);
   if (el && sub) el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1091,6 +1177,12 @@ $("#settings-form").addEventListener("submit", async (e) => {
     service_alert_enabled: f.service_alert_enabled.checked,
     watch_service: f.watch_service.value.trim(),
     service_alert_seconds: +f.service_alert_seconds.value || 60,
+    panel_url: location.origin,
+    replace_enabled: f.replace_enabled.checked,
+    replace_max_per_account: +f.replace_max_per_account.value || 3,
+    replace_max_per_day: +f.replace_max_per_day.value || 6,
+    replace_template: Object.fromEntries($$("#replace-sec [data-t]").map((el) => [el.dataset.t,
+      el.type === "checkbox" ? el.checked : el.type === "number" ? +el.value : el.value])),
     probes: $$(".probe-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.url),
     push_probes: $$(".push-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.name || p.token),
   };
@@ -1102,6 +1194,15 @@ $("#settings-form").addEventListener("submit", async (e) => {
     S.settings = null;
     await loadSettings();
     loadProbeStatus();
+  });
+});
+$("#replace-create").addEventListener("click", (e) => {
+  if ($(".savebar").classList.contains("dirty")) return toast("请先保存设置，再按模板新建", true);
+  if (!confirm("按替补模板，在第一个有空位的 GCP 账号新建一台实例？")) return;
+  busy(e.currentTarget, async () => {
+    toast("正在创建，通常需要 30-60 秒…");
+    const r = await api("/api/replace/create", { method: "POST" });
+    toast(`已创建 ${r.instance.name}（${r.instance.account_name}），IP ${r.instance.external_ip || "-"}`);
   });
 });
 $("#probe-test-form").addEventListener("submit", async (e) => {

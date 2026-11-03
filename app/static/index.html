@@ -125,6 +125,7 @@
           <div class="seg" id="inst-filter" role="tablist">
             <button type="button" data-f="all" class="on">全部</button>
             <button type="button" data-f="gcp">GCP</button>
+            <button type="button" data-f="azure">Azure</button>
             <button type="button" data-f="manual">自有</button>
             <button type="button" data-f="issue">异常</button>
           </div>
@@ -176,18 +177,34 @@
       <!-- 账号与服务器 -->
       <section class="view hidden" id="view-accounts">
         <div class="card">
-          <div class="card-head"><h2>GCP 服务账号</h2></div>
-          <p class="muted small">在 GCP 控制台 → IAM → 服务账号中创建 JSON 密钥。角色：<code>Compute Admin</code>；使用「执行命令」还需要 <code>Service Account User</code>。</p>
+          <div class="card-head"><h2>云账号</h2><span class="muted small">GCP 与 Azure；自动替补按列表顺序使用 GCP 账号</span></div>
           <div class="table-card flat">
-            <table class="tbl" id="accounts-table"><thead><tr><th>名称</th><th>项目</th><th>服务账号</th><th class="r"></th></tr></thead><tbody></tbody></table>
+            <table class="tbl" id="accounts-table"><thead><tr><th>名称</th><th>类型</th><th>项目 / 订阅</th><th>实例</th><th>状态</th><th class="r"></th></tr></thead><tbody></tbody></table>
           </div>
         </div>
         <div class="grid-2 align-start">
           <form class="card" id="account-form">
-            <div class="card-head"><h2>添加 GCP 账号</h2></div>
-            <label>名称<input name="name" placeholder="可选，默认使用项目 ID"></label>
-            <label>密钥 JSON 文件<input type="file" id="key-file" accept=".json,application/json"></label>
-            <label>或粘贴密钥 JSON<textarea name="key" rows="5" placeholder='{"type": "service_account", ...}'></textarea></label>
+            <div class="card-head"><h2>添加云账号</h2>
+              <div class="seg small-seg" id="acct-kind" role="tablist">
+                <button type="button" data-k="gcp" class="on">GCP</button><button type="button" data-k="azure">Azure</button>
+              </div>
+            </div>
+            <label>名称<input name="name" placeholder="可选，默认使用项目 ID / 订阅 ID"></label>
+            <div data-kind="gcp">
+              <p class="muted small">GCP 控制台 → IAM → 服务账号 → 创建 JSON 密钥。角色：<code>Compute Admin</code>；使用「执行命令」还需要 <code>Service Account User</code>。</p>
+              <label>密钥 JSON 文件<input type="file" id="key-file" accept=".json,application/json"></label>
+              <label>或粘贴密钥 JSON<textarea name="key" rows="5" placeholder='{"type": "service_account", ...}'></textarea></label>
+            </div>
+            <div data-kind="azure" class="hidden">
+              <p class="muted small">在 Azure Cloud Shell 执行（把订阅 ID 换成你的）：<br><code>az ad sp create-for-rbac --name gcpvm --role Contributor --scopes /subscriptions/订阅ID</code><br>把输出的 JSON 粘贴到下面，会自动填好；订阅 ID 在门户「订阅」页查看。</p>
+              <label>粘贴命令输出（可选）<textarea id="az-paste" rows="4" placeholder='{"appId": "...", "password": "...", "tenant": "..."}'></textarea></label>
+              <div class="form-grid tight">
+                <label>订阅 ID<input name="subscription_id" placeholder="xxxxxxxx-xxxx-..." autocomplete="off"></label>
+                <label>租户 ID（tenant）<input name="tenant_id" autocomplete="off"></label>
+                <label>应用 ID（appId）<input name="client_id" autocomplete="off"></label>
+                <label>密码（password）<input name="client_secret" type="password" autocomplete="new-password"></label>
+              </div>
+            </div>
             <div class="form-actions"><button class="btn primary" type="submit">验证并添加</button></div>
           </form>
           <form class="card form-grid" id="server-form">
@@ -216,6 +233,7 @@
             <a href="#/settings/notify" data-sec="notify">通知与 DNS</a>
             <a href="#/settings/monitor" data-sec="monitor">服务监控</a>
             <a href="#/settings/status" data-sec="status">公开速率页</a>
+            <a href="#/settings/replace" data-sec="replace">自动替补</a>
           </nav>
           <form id="settings-form" class="settings-body">
             <div class="card form-grid sec" data-sec="detect">
@@ -278,6 +296,33 @@
               <label>嵌入高度（px，按分组数估算）<input id="status-height" type="number" value="260" min="120" max="3000"></label>
               <label class="span2">嵌入代码（粘贴到 NY「站点公告」，保存设置后生效）<textarea id="status-embed" rows="3" readonly class="mono"></textarea></label>
               <div class="span2 inline"><button type="button" class="btn small" id="status-copy"><svg aria-hidden="true"><use href="#i-copy"/></svg>复制嵌入代码</button></div>
+            </div>
+
+            <div class="card form-grid sec" data-sec="replace" id="replace-sec">
+              <div class="card-head span2"><h2>自动替补（GCP）</h2><button type="button" class="btn small" id="replace-create"><svg aria-hidden="true"><use href="#i-plus"/></svg>按模板新建一台</button></div>
+              <p class="muted small span2">勾选了「自动替补」的 GCP 实例，在<b>账号被封 / 停用</b>（连续两轮检测确认）或<b>实例被删除、挂起</b>时，按下面的模板在下一个有空位的账号新建一台，并沿用原实例的分组、检测端口、自动换 IP 和 Cloudflare 域名，然后 TG 通知。每个账号开满上限后自动用下一个账号。注意：在 GCP 控制台手动删除这类实例也会触发替补，不想替补请先在面板删除。</p>
+              <label class="check span2"><input type="checkbox" name="replace_enabled"> 开启自动替补</label>
+              <label>每个账号最多实例数<input type="number" name="replace_max_per_account" min="1" max="100"></label>
+              <label>24 小时内最多替补台数（防失控）<input type="number" name="replace_max_per_day" min="1" max="200"></label>
+              <h3 class="span2">替补模板</h3>
+              <label>实例名前缀<input data-t="name_prefix" placeholder="gcp"></label>
+              <label>可用区<input data-t="zone" placeholder="asia-east1-b"></label>
+              <label>机型<input data-t="machine_type" placeholder="e2-highcpu-4（4 核 4 GB）"></label>
+              <label>系统
+                <select data-t="image"><option value="debian-12">Debian 12</option><option value="debian-13">Debian 13</option><option value="ubuntu-2404">Ubuntu 24.04 LTS</option><option value="ubuntu-2204">Ubuntu 22.04 LTS</option><option value="rocky-9">Rocky Linux 9</option><option value="alma-9">AlmaLinux 9</option></select>
+              </label>
+              <label>磁盘大小（GB）<input type="number" data-t="disk_size_gb" min="10" max="2000"></label>
+              <label>磁盘类型<select data-t="disk_type"><option value="pd-balanced">pd-balanced</option><option value="pd-standard">pd-standard</option><option value="pd-ssd">pd-ssd</option></select></label>
+              <label>网络层级<select data-t="network_tier"><option value="PREMIUM">高级 PREMIUM</option><option value="STANDARD">标准 STANDARD</option></select></label>
+              <label>IP 类型<select data-t="ip_mode"><option value="static">静态 IP</option><option value="ephemeral">临时 IP</option></select></label>
+              <label>检测端口（新建时）<input type="number" data-t="check_port" min="1" max="65535"></label>
+              <label>分组（新建时）<input data-t="grp" maxlength="40"></label>
+              <label class="span2">网络标记（可选）<input data-t="tags" placeholder="proxy-server"></label>
+              <label class="check span2"><input type="checkbox" data-t="spot"> Spot 抢占式</label>
+              <label class="check span2"><input type="checkbox" data-t="install_agent"> 自动安装面板流量 / 服务上报</label>
+              <label class="span2">开机执行一次的脚本（安装 nyanpass、对接 NY 等）
+                <textarea data-t="startup_script" rows="6" spellcheck="false" class="mono" placeholder="例如：NY 面板生成的节点对接命令"></textarea>
+              </label>
             </div>
 
             <div class="savebar"><span class="muted small" id="save-hint">修改后记得保存</span><button class="btn primary" type="submit">保存设置</button></div>
@@ -399,9 +444,10 @@
       </div>
       <label class="check"><input type="checkbox" name="auto_ip"> <span id="auto-ip-label">被墙自动更换 IP</span></label>
       <div id="gcp-fields"><label class="check"><input type="checkbox" name="auto_start"> 关机 / 被回收时自动开机</label></div>
+      <div id="replace-field"><label class="check"><input type="checkbox" name="auto_replace"> 账号被封 / 实例被删除时自动替补（设置 →「自动替补」）</label></div>
       <label>检测端口（实际在用的转发 / 入口端口，如 443）<input type="number" name="check_port" min="1" max="65535"></label>
       <div id="gcp-fields-2">
-        <label>IP 类型
+        <label id="ipmode-field">IP 类型
           <select name="ip_mode">
             <option value="static">静态 IP（推荐：换 IP 更快、能占住被墙 IP）</option>
             <option value="ephemeral">临时 IP</option>
@@ -434,10 +480,8 @@
       <label>机型<select name="machine_type" required><option value="">先选择可用区</option></select></label>
       <label>系统<select name="image"></select></label>
       <label>磁盘大小（GB）<input name="disk_size_gb" type="number" min="10" max="2000" value="20"></label>
-      <label>磁盘类型
-        <select name="disk_type"><option value="pd-balanced">平衡型 pd-balanced（推荐）</option><option value="pd-standard">标准型 pd-standard</option><option value="pd-ssd">SSD pd-ssd</option></select>
-      </label>
-      <label>网络层级
+      <label>磁盘类型<select name="disk_type"></select></label>
+      <label id="tier-field">网络层级
         <select name="network_tier"><option value="PREMIUM">高级（国内连接通常更好）</option><option value="STANDARD">标准（另一套 IP 池，流量更便宜）</option></select>
       </label>
       <label class="check span2"><input type="checkbox" name="spot"> Spot 抢占式（便宜 60-90%，可能被回收，建议开启自动开机）</label>
@@ -445,14 +489,14 @@
       <label class="check"><input type="checkbox" name="auto_ip" checked> 被墙自动更换 IP</label>
       <label class="check"><input type="checkbox" name="auto_start"> 关机 / 被回收时自动开机</label>
       <label>检测端口<input name="check_port" type="number" min="1" max="65535" value="22"></label>
-      <label>网络标记（可选）<input name="tags" placeholder="proxy-server"></label>
+      <label id="tags-field">网络标记（可选）<input name="tags" placeholder="proxy-server"></label>
       <label class="span2">备注（可选）<input name="note"></label>
       <label class="span2">开机后执行一次的脚本（可选）
         <select id="create-preset"><option value="">— 从常用脚本填入 —</option></select>
         <textarea name="startup_script" rows="4" spellcheck="false" class="mono" placeholder="例如：NY 对接命令"></textarea>
       </label>
     </div>
-    <p class="muted small">面板 SSH 公钥会在创建时写入，建好即可执行命令。不附加服务账号。</p>
+    <p class="muted small" id="create-note">面板 SSH 公钥会在创建时写入，建好即可执行命令。不附加服务账号。</p>
     <div class="form-actions"><span id="create-hint" class="muted small"></span><span class="spacer"></span><button class="btn primary" type="submit">创建实例</button></div>
   </form>
 </dialog>

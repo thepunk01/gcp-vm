@@ -138,11 +138,33 @@ def create_app(
     # ---- accounts ----
     @protected
     async def list_accounts(_: Request):
-        return JSONResponse(db.list_accounts())
+        counts: dict[int, int] = {}
+        for i in db.list_instances():
+            if i["status"] != "LOST":
+                counts[i["account_id"]] = counts.get(i["account_id"], 0) + 1
+        return JSONResponse([a | {"instances": counts.get(a["id"], 0)} for a in db.list_accounts("cloud")])
+
+    @protected
+    async def reset_account_status(request: Request):
+        await asyncio.to_thread(manager.reset_account_status, int_param(request))
+        return JSONResponse({"ok": True})
+
+    @protected
+    async def replace_create(_: Request):
+        inst = await asyncio.to_thread(manager.create_from_template)
+        return JSONResponse({"instance": _clean(inst)})
 
     @protected
     async def add_account(request: Request):
         data = await body(request)
+        if data.get("kind") == "azure":
+            from .azure import AzureClient, validate_azure_key
+            key = validate_azure_key(data.get("key") if isinstance(data.get("key"), dict) else data)
+            await asyncio.to_thread(lambda: AzureClient(key).list_instances())
+            acc = db.add_account(str(data.get("name") or "").strip() or f"azure-{key['subscription_id'][:8]}", key, "azure")
+            n = await asyncio.to_thread(manager.sync_account, acc["id"])
+            db.add_event("account", f"添加 Azure 账号 {acc['name']}（订阅 {acc['project_id']}），发现 {n} 台实例")
+            return JSONResponse(acc)
         key = data.get("key")
         if isinstance(key, str):
             try:
@@ -558,6 +580,41 @@ def create_app(
                 names.add(name)
                 clean.append({"name": name, "token": tok})
             data["push_probes"] = clean
+        if "panel_url" in data:
+            from .traffic import normalize_panel_url
+            try:
+                data["panel_url"] = normalize_panel_url(str(data["panel_url"])) if data["panel_url"] else ""
+            except ValueError:
+                data["panel_url"] = ""
+        if "replace_enabled" in data:
+            data["replace_enabled"] = bool(data["replace_enabled"])
+        for k, lo, hi in (("replace_max_per_account", 1, 100), ("replace_max_per_day", 1, 200)):
+            if k in data:
+                data[k] = int(data[k])
+                if not lo <= data[k] <= hi:
+                    raise ValueError(f"{k} 范围 {lo}-{hi}")
+        if "replace_template" in data:
+            t = data["replace_template"]
+            if not isinstance(t, dict):
+                raise ValueError("replace_template 必须是对象")
+            from .config import DEFAULT_SETTINGS
+            base = DEFAULT_SETTINGS["replace_template"]
+            clean_t = {}
+            for k, dv in base.items():
+                v = t.get(k, dv)
+                if isinstance(dv, bool):
+                    clean_t[k] = bool(v)
+                elif isinstance(dv, int):
+                    clean_t[k] = int(v or dv)
+                else:
+                    clean_t[k] = str(v or "").strip() if k != "startup_script" else str(v or "")[:65536]
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", clean_t["name_prefix"] or "x"):
+                raise ValueError("实例名前缀只能用小写字母、数字和短横线，以字母开头")
+            if clean_t["zone"] and not re.fullmatch(r"[a-z]+-[a-z]+\d+-[a-z]", clean_t["zone"]):
+                raise ValueError("替补模板的可用区格式不正确，例如 asia-east1-b")
+            if not 1 <= clean_t["check_port"] <= 65535:
+                raise ValueError("检测端口范围 1-65535")
+            data["replace_template"] = clean_t
         if "probes" in data:
             if not isinstance(data["probes"], list):
                 raise ValueError("probes 必须是列表")
@@ -641,6 +698,8 @@ def create_app(
         Route("/api/accounts", list_accounts),
         Route("/api/accounts", add_account, methods=["POST"]),
         Route("/api/accounts/{id}", delete_account, methods=["DELETE"]),
+        Route("/api/accounts/{id}/reset-status", reset_account_status, methods=["POST"]),
+        Route("/api/replace/create", replace_create, methods=["POST"]),
         Route("/api/servers", add_server, methods=["POST"]),
         Route("/api/servers/bootstrap.sh", server_bootstrap_sh),
         Route("/api/servers/{id}", update_server, methods=["PATCH"]),

@@ -199,10 +199,16 @@ class FakeGCP:
 
 
 class FakePool:
-    def __init__(self, client):
+    def __init__(self, client, azure=None, by_account=None):
         self.client = client
+        self.azure = azure
+        self.by_account = by_account or {}
 
     def get(self, account):
+        if account["id"] in self.by_account:
+            return self.by_account[account["id"]]
+        if account.get("kind") == "azure" and self.azure is not None:
+            return self.azure
         return self.client
 
     def drop(self, account_id):

@@ -83,7 +83,9 @@ INSTANCE_CONFIG_FIELDS = {
     "dns_record": str,
     "note": str,
     "grp": str,
+    "auto_replace": int,
 }
+CLOUD_KINDS = ("gcp", "azure")
 
 
 class Database:
@@ -109,12 +111,19 @@ class Database:
             ("traffic_token", "TEXT DEFAULT ''"),
             ("ssh_port", "INTEGER DEFAULT 22"),
             ("ssh_user", "TEXT DEFAULT ''"),
+            ("auto_replace", "INTEGER DEFAULT 0"),
         ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE instances ADD COLUMN {name} {ddl}")
         acols = {r[1] for r in self._conn.execute("PRAGMA table_info(accounts)")}
-        if "kind" not in acols:
-            self._conn.execute("ALTER TABLE accounts ADD COLUMN kind TEXT DEFAULT 'gcp'")
+        for name, ddl in (
+            ("kind", "TEXT DEFAULT 'gcp'"),
+            ("status", "TEXT DEFAULT 'ok'"),       # ok / banned（被封或停用）
+            ("status_msg", "TEXT DEFAULT ''"),
+            ("status_at", "REAL DEFAULT 0"),
+        ):
+            if name not in acols:
+                self._conn.execute(f"ALTER TABLE accounts ADD COLUMN {name} {ddl}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -155,18 +164,25 @@ class Database:
         return self.get_settings()
 
     # ---------------- accounts ----------------
-    def add_account(self, name: str, key: dict) -> dict:
+    def add_account(self, name: str, key: dict, kind: str = "gcp") -> dict:
+        if kind == "azure":
+            project, email = key["subscription_id"], key["client_id"]
+        else:
+            project, email = key["project_id"], key["client_email"]
         with self.tx() as c:
             cur = c.execute(
-                "INSERT INTO accounts(name, project_id, client_email, key_json, created_at) "
-                "VALUES(?, ?, ?, ?, ?)",
-                (name, key["project_id"], key["client_email"], json.dumps(key), time.time()),
+                "INSERT INTO accounts(name, project_id, client_email, key_json, created_at, kind) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (name, project, email, json.dumps(key), time.time(), kind),
             )
             return self.get_account(cur.lastrowid, with_key=False)  # type: ignore[arg-type]
 
     def list_accounts(self, kind: str | None = "gcp") -> list[dict]:
         """默认只列 GCP 账号；kind=None 列出全部（含「自有服务器」内置账号）。"""
-        cols = "id, name, project_id, client_email, created_at, kind"
+        cols = "id, name, project_id, client_email, created_at, COALESCE(kind, 'gcp') AS kind, " \
+            "COALESCE(status, 'ok') AS status, status_msg, status_at"
+        if kind == "cloud":
+            return self._all(f"SELECT {cols} FROM accounts WHERE COALESCE(kind, 'gcp') IN ('gcp', 'azure') ORDER BY id")
         if kind is None:
             return self._all(f"SELECT {cols} FROM accounts ORDER BY id")
         return self._all(f"SELECT {cols} FROM accounts WHERE COALESCE(kind, 'gcp') = ? ORDER BY id", (kind,))
@@ -199,11 +215,18 @@ class Database:
             return self.get_instance(int(cur.lastrowid))  # type: ignore[return-value]
 
     def get_account(self, account_id: int, with_key: bool = True) -> dict | None:
-        cols = "*" if with_key else "id, name, project_id, client_email, created_at"
+        cols = "*" if with_key else "id, name, project_id, client_email, created_at, COALESCE(kind, 'gcp') AS kind, COALESCE(status, 'ok') AS status, status_msg"
         row = self._one(f"SELECT {cols} FROM accounts WHERE id = ?", (account_id,))
         if row and with_key:
             row["key"] = json.loads(row.pop("key_json"))
         return row
+
+    def set_account_status(self, account_id: int, status: str, msg: str = "") -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE accounts SET status = ?, status_msg = ?, status_at = ? WHERE id = ?",
+                (status, msg[:500], time.time(), account_id),
+            )
 
     def delete_account(self, account_id: int) -> None:
         with self.tx() as c:
@@ -262,13 +285,15 @@ class Database:
 
     def list_instances(self) -> list[dict]:
         return self._all(
-            "SELECT i.*, a.name AS account_name, COALESCE(a.kind, 'gcp') AS provider FROM instances i "
+            "SELECT i.*, a.name AS account_name, COALESCE(a.kind, 'gcp') AS provider, "
+            "COALESCE(a.status, 'ok') AS account_status FROM instances i "
             "JOIN accounts a ON a.id = i.account_id ORDER BY COALESCE(a.kind, 'gcp'), a.id, i.zone, i.name"
         )
 
     def get_instance(self, instance_id: int) -> dict | None:
         return self._one(
-            "SELECT i.*, a.name AS account_name, COALESCE(a.kind, 'gcp') AS provider FROM instances i "
+            "SELECT i.*, a.name AS account_name, COALESCE(a.kind, 'gcp') AS provider, "
+            "COALESCE(a.status, 'ok') AS account_status FROM instances i "
             "JOIN accounts a ON a.id = i.account_id WHERE i.id = ?",
             (instance_id,),
         )
@@ -291,7 +316,7 @@ class Database:
         for k, cast in INSTANCE_CONFIG_FIELDS.items():
             if k in values and values[k] is not None:
                 v = values[k]
-                clean[k] = int(bool(v)) if k in ("auto_ip", "auto_start") else cast(v)
+                clean[k] = int(bool(v)) if k in ("auto_ip", "auto_start", "auto_replace") else cast(v)
         if "ip_mode" in clean and clean["ip_mode"] not in ("ephemeral", "static"):
             raise ValueError("ip_mode 只能是 ephemeral 或 static")
         if "check_port" in clean and not (1 <= clean["check_port"] <= 65535):
@@ -346,6 +371,10 @@ class Database:
             "SELECT COUNT(*) AS n FROM events WHERE instance_id = ? AND type = ? AND ts >= ?",
             (instance_id, type_, since),
         )
+        return int(row["n"]) if row else 0
+
+    def count_type_since(self, type_: str, since: float) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM events WHERE type = ? AND ts >= ?", (type_, since))
         return int(row["n"]) if row else 0
 
     # ---------------- blocked ips ----------------

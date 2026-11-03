@@ -385,20 +385,29 @@ class GCPClient:
 
 
 class ClientPool:
-    """按账号 id 缓存 GCPClient（缓存访问令牌）。"""
+    """按账号 id 缓存客户端（缓存访问令牌）。GCP 账号用 GCPClient，Azure 账号用 AzureClient。"""
 
-    def __init__(self, factory=GCPClient):
-        self._clients: dict[int, tuple[str, GCPClient]] = {}
+    def __init__(self, factory=GCPClient, azure_factory=None):
+        self._clients: dict[int, tuple[str, Any]] = {}
         self._factory = factory
+        self._azure_factory = azure_factory
         self._lock = threading.Lock()
 
-    def get(self, account: dict) -> GCPClient:
-        fingerprint = account["key"].get("private_key_id", "") + account["key"]["client_email"]
+    def get(self, account: dict):
+        import hashlib
+        import json
+
+        kind = account.get("kind") or "gcp"
+        fingerprint = kind + hashlib.sha256(json.dumps(account["key"], sort_keys=True).encode()).hexdigest()
         with self._lock:
             cached = self._clients.get(account["id"])
             if cached and cached[0] == fingerprint:
                 return cached[1]
-            client = self._factory(account["key"])
+            if kind == "azure":
+                from .azure import AzureClient
+                client = (self._azure_factory or AzureClient)(account["key"])
+            else:
+                client = self._factory(account["key"])
             self._clients[account["id"]] = (fingerprint, client)
             return client
 

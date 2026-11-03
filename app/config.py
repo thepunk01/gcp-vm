@@ -84,6 +84,28 @@ DEFAULT_SETTINGS: dict = {
     "status_page_enabled": False,
     "status_page_key": "",
     "status_page_title": "实时速率",
+    # 面板对外地址（保存设置时由浏览器自动填写），用于给自动新建的实例生成上报脚本
+    "panel_url": "",
+    # GCP 自动替补：账号被封/停用、实例被删除或挂起时，按模板在下一个有空位的账号新建实例
+    "replace_enabled": False,
+    "replace_max_per_account": 3,
+    "replace_max_per_day": 6,
+    "replace_template": {
+        "name_prefix": "gcp",
+        "zone": "asia-east1-b",
+        "machine_type": "e2-highcpu-4",
+        "image": "debian-12",
+        "disk_size_gb": 20,
+        "disk_type": "pd-balanced",
+        "network_tier": "PREMIUM",
+        "spot": False,
+        "tags": "",
+        "check_port": 22,
+        "grp": "",
+        "ip_mode": "static",
+        "install_agent": True,
+        "startup_script": "",
+    },
     # 「执行命令」里的常用脚本：[{"name": "...", "script": "..."}]
     "script_presets": [
         {

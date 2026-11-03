@@ -339,3 +339,15 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
   .mini-kpis b { font-size: 14.5px; }
 }
 @media (prefers-reduced-motion: reduce) { .drawer, .sidebar { transition: none; } }
+
+/* 账号类型切换 / 账号表 */
+.small-seg button { padding: 4px 11px; font-size: 12.5px; }
+#account-form .card-head { gap: 10px; }
+@media (max-width: 760px) {
+  #accounts-table thead { display: none; }
+  #accounts-table, #accounts-table tbody, #accounts-table tr, #accounts-table td { display: block; width: 100%; }
+  #accounts-table tr { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  #accounts-table td { border: 0; padding: 3px 0; display: flex; align-items: flex-start; }
+  #accounts-table td[data-l]::before { content: attr(data-l); flex: none; width: 74px; color: var(--faint); font-size: 12px; padding-top: 2px; }
+  #accounts-table td.r .ops { justify-content: flex-start; margin-top: 6px; }
+}

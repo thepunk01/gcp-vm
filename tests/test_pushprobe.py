@@ -29,6 +29,7 @@ def test_auth_and_tasks():
 
 def test_offline_probe_returns_unknown_immediately():
     hub, _ = make_hub()
+    hub._started -= 1000  # 已过启动宽限期
     start = time.time()
     r = hub.result("home", "1.2.3.4", 22)
     assert r.ok is None and "离线" in r.error and time.time() - start < 1
@@ -53,7 +54,21 @@ def test_cached_and_waited_results():
     assert r.ok is True and r.latency_ms == 31.5
 
     # 等待超时
-    assert hub.result("home", "9.9.9.9", 80, wait=0.2).error == "等待探针上报超时"
+    assert hub.result("home", "9.9.9.9", 80, wait=0.2).error.startswith("等待探针上报超时")
+
+
+def test_startup_grace_waits_for_reconnect():
+    hub, _ = make_hub()  # 面板刚启动，探针还没连上
+
+    def reconnect():
+        time.sleep(0.2)
+        hub.tasks("home")
+        hub.report("home", [{"host": "1.2.3.4", "port": 22, "ok": True, "latency_ms": 12}])
+
+    threading.Thread(target=reconnect).start()
+    r = hub.result("home", "1.2.3.4", 22, wait=5)
+    assert r.ok is True
+    assert hub.result("home", "7.7.7.7", 22, wait=0.1).ok is None
 
 
 def test_checker_uses_push_probe():

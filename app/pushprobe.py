@@ -14,10 +14,12 @@ from typing import Callable
 
 from .checker import ProbeResult
 
-POLL_INTERVAL = 20  # 探针领取任务的间隔（秒）
+POLL_INTERVAL = 10  # 探针领取任务的间隔（秒），越短新 IP 验证越快
 FRESH_SECONDS = 90  # 结果在此时间内视为有效
 OFFLINE_SECONDS = 120  # 超过此时间未上报视为离线
-WAIT_SECONDS = 45  # 新目标等待探针上报的最长时间
+# 新目标等待探针上报的最长时间：最坏情况 = 领取间隔 + 上一轮探测（被墙目标 5 秒 × 3 次）+ 本轮探测，留足余量
+WAIT_SECONDS = 90
+STARTUP_GRACE = 150  # 面板刚启动时探针还没重连，这段时间内不判离线，等它连上
 PENDING_TTL = 120  # 临时目标保留时间
 MAX_TARGETS = 200
 
@@ -28,6 +30,7 @@ class PushProbeHub:
         self._results: dict[tuple[str, str, int], tuple[bool, float | None, str, float]] = {}
         self._last_seen: dict[str, float] = {}
         self._pending: dict[tuple[str, int], float] = {}
+        self._started = time.time()
         self.settings_fn: Callable[[], dict] = lambda: {}
         self.targets_fn: Callable[[], list[tuple[str, int]]] = lambda: []
 
@@ -110,7 +113,9 @@ class PushProbeHub:
             cached = self._results.get(key)
             if cached and now - cached[3] <= FRESH_SECONDS:
                 return ProbeResult(name, cached[0], cached[1], cached[2])
-            if now - self._last_seen.get(name, 0.0) > OFFLINE_SECONDS:
+            seen = self._last_seen.get(name, 0.0)
+            starting = not seen and now - self._started < STARTUP_GRACE
+            if now - seen > OFFLINE_SECONDS and not starting:
                 return ProbeResult(name, None, error="主动上报探针离线（超过 2 分钟未连接面板）")
             self._pending[(host, int(port))] = now + PENDING_TTL
             requested = now
@@ -121,7 +126,9 @@ class PushProbeHub:
                     return ProbeResult(name, cached[0], cached[1], cached[2])
                 left = deadline - time.time()
                 if left <= 0:
-                    return ProbeResult(name, None, error="等待探针上报超时")
+                    if not self._last_seen.get(name):
+                        return ProbeResult(name, None, error="面板重启后探针还没重新连上")
+                    return ProbeResult(name, None, error=f"等待探针上报超时（{int(wait)} 秒）")
                 self._cond.wait(left)
 
 

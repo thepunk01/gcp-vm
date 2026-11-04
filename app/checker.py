@@ -132,7 +132,8 @@ class BlockChecker:
         cn = self.probe_cn(host, port)
         usable = [p for p in cn if p.ok is not None]
         if not usable:
-            detail = "未配置国内探针" if not cn else "所有国内探针均不可用"
+            why = "；".join(f"{p.source}：{p.error or '无结果'}" for p in cn)
+            detail = "未配置国内探针" if not cn else f"所有国内探针均不可用（{why}）"
             return CheckResult(STATE_UNKNOWN, cn=cn, detail=detail)
 
         success = sum(1 for p in usable if p.ok) / len(usable)

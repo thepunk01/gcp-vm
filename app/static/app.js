@@ -1195,6 +1195,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
     replace_enabled: f.replace_enabled.checked,
     replace_max_per_account: +f.replace_max_per_account.value || 3,
     replace_max_per_day: +f.replace_max_per_day.value || 6,
+    replace_stopped_minutes: Math.max(0, +f.replace_stopped_minutes.value || 0),
     replace_template: S.tpls[""],
     replace_templates: Object.fromEntries(Object.entries(S.tpls).filter(([k]) => k)),
     probes: $$(".probe-row").map((r) => Object.fromEntries($$("input", r).map((i) => [i.dataset.k, i.value.trim()]))).filter((p) => p.url),

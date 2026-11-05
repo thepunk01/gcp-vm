@@ -88,6 +88,8 @@ DEFAULT_SETTINGS: dict = {
     "replace_enabled": False,
     "replace_max_per_account": 3,
     "replace_max_per_day": 6,
+    # 替补实例停机超过这么多分钟：先尝试开机，开不了（结算停用 / 无资源等）就替补；0 = 不处理停机
+    "replace_stopped_minutes": 10,
     "replace_template": {
         "name_prefix": "gcp",
         "zone": "asia-east1-b",

@@ -71,6 +71,7 @@ class Manager:
         self._cycle_lock = threading.Lock()
         self._acct_fails: dict[int, int] = {}
         self._suspended_seen: dict[int, int] = {}
+        self._stopped_since: dict[int, float] = {}
         self._replace_warned: set[int] = set()
         self._replace_lock = threading.Lock()
 
@@ -923,8 +924,10 @@ class Manager:
                     self._event(None, "replace", f"账号 {acc['name']} 判定为被封/停用：{str(e)[:300]}", "error", notify=True)
                 except Exception as e:  # noqa: BLE001
                     log.warning("同步账号 %s 出错：%s", acc["name"], e)
-            # 2) 找出需要替补的实例
-            todo: list[tuple[dict, str]] = []
+            # 2) 停机的替补实例：停机超过设定时间先尝试开机，开不了就替补（账号级错误则判定账号停用）
+            stopped_fail = self._handle_stopped(settings)
+            # 3) 找出需要替补的实例
+            todo: list[tuple[dict, str]] = [(i, "停机且无法开机") for i in stopped_fail]
             for inst in self.db.list_instances():
                 if inst["provider"] != "gcp" or not inst.get("auto_replace"):
                     continue
@@ -935,11 +938,13 @@ class Manager:
                         todo.append((inst, "实例被挂起"))
                     continue
                 self._suspended_seen.pop(inst["id"], None)
+                if any(t[0]["id"] == inst["id"] for t in todo):
+                    continue
                 if inst["account_status"] == "banned":
                     todo.append((inst, "账号被封"))
                 elif inst["status"] == "LOST":
                     todo.append((inst, "实例被删除"))
-            # 3) 逐个替补
+            # 4) 逐个替补
             limit = int(settings.get("replace_max_per_day", 6))
             for old, reason in todo:
                 if self.db.count_type_since("replace_new", time.time() - 86400) >= limit:
@@ -949,6 +954,33 @@ class Manager:
                     return
                 self._replace_warned.discard(-1)
                 self._replace_one(old, reason, settings)
+
+    def _handle_stopped(self, settings: dict) -> list[dict]:
+        """返回「停机且开不了、账号本身正常」需要替补的实例。账号级错误会把账号标记为停用（随后整号替补）。"""
+        minutes = int(settings.get("replace_stopped_minutes", 10) or 0)
+        now = time.time()
+        failed: list[dict] = []
+        for inst in self.db.list_instances():
+            if inst["provider"] != "gcp" or not inst.get("auto_replace") or inst["account_status"] == "banned" \
+                    or inst["status"] not in ("TERMINATED", "STOPPED"):
+                self._stopped_since.pop(inst["id"], None)
+                continue
+            since = self._stopped_since.setdefault(inst["id"], now)
+            if not minutes or now - since < minutes * 60:
+                continue
+            acc = self.db.get_account(inst["account_id"], with_key=False) or {}
+            if acc.get("status") == "banned":
+                continue  # 同一轮里账号刚被判定停用，交给整号替补
+            try:
+                self.power(inst["id"], "start", source=f"停机超过 {minutes} 分钟，自动")
+                self._stopped_since.pop(inst["id"], None)
+            except ManagerError as e:
+                if self._is_account_fatal(e):
+                    self.db.set_account_status(inst["account_id"], "banned", str(e))
+                    self._event(inst, "replace", f"账号 {inst['account_name']} 无法开机（结算停用 / 无权限），判定为停用：{str(e)[:200]}", "error", notify=True)
+                else:
+                    failed.append(inst)
+        return failed
 
     def _replace_one(self, old: dict, reason: str, settings: dict) -> None:
         accounts = self._candidate_accounts(settings, after_id=old["account_id"], exclude=old["account_id"])
@@ -969,12 +1001,13 @@ class Manager:
         self.db.add_event("replace_new", msg, new["id"], "warn")
         send_telegram(self.db.get_settings(), f"GCP-VM {msg}")
         log.warning(msg)
-        if reason == "实例被挂起":
+        if reason in ("实例被挂起", "停机且无法开机"):
             try:
                 self._client(old["account_id"]).delete_instance(old["zone"], old["name"])
             except GCPError as e:
                 self._event(old, "replace", f"删除被挂起的旧实例失败：{e}", "warn")
         self._suspended_seen.pop(old["id"], None)
+        self._stopped_since.pop(old["id"], None)
         self.db.delete_instance(old["id"])
 
     def reset_account_status(self, account_id: int) -> None:

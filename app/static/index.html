@@ -303,6 +303,8 @@
               <label class="check span2"><input type="checkbox" name="replace_enabled"> 开启自动替补</label>
               <label>每个账号最多实例数<input type="number" name="replace_max_per_account" min="1" max="100"></label>
               <label>24 小时内最多替补台数（防失控）<input type="number" name="replace_max_per_day" min="1" max="200"></label>
+              <label class="span2">停机处理：替补实例停机超过（分钟）先自动开机，开不了（结算停用、无资源等）就替补；0 = 不处理
+                <input type="number" name="replace_stopped_minutes" min="0" max="1440"></label>
               <h3 class="span2">替补模板 <span class="muted small">哪个分组的机器挂了，就用哪个分组的模板；分组没有专属模板时用默认模板</span></h3>
               <div class="span2 tpl-bar">
                 <label>正在编辑<select id="tpl-group"></select></label>

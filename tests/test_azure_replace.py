@@ -1,3 +1,4 @@
+import time
 import tempfile
 
 import pytest
@@ -457,3 +458,55 @@ def test_replace_follows_original_then_falls_back(renv):
     new = db.list_instances()[0]
     assert new["account_id"] == accs[2]["id"] and c.inserted["machineType"].endswith("e2-highcpu-4")
     assert any("改用模板的可用区和机型重试" in e["message"] for e in db.list_events())
+
+
+def _stop_vm1(mgr, db, a, accs, minutes=0.0):
+    a.instances[("asia-east1-b", "vm1")]["status"] = "TERMINATED"
+    db.update_settings({"replace_stopped_minutes": 1})
+    mgr.sync_account(accs[0]["id"])
+    iid = db.list_instances()[0]["id"]
+    mgr._stopped_since[iid] = time.time() - 120  # 已停机 2 分钟
+    return iid
+
+
+def test_stopped_instance_is_restarted_first(renv):
+    mgr, db, (a, b, c), accs = renv
+    iid = _stop_vm1(mgr, db, a, accs)
+    mgr.replace_cycle()
+    assert db.get_instance(iid)["status"] == "RUNNING" and ("start", "vm1") in a.calls
+    assert not b.instances
+
+
+def test_stopped_billing_disabled_bans_account_and_replaces(renv):
+    mgr, db, (a, b, c), accs = renv
+    iid = _stop_vm1(mgr, db, a, accs)
+
+    def no_billing(zone, name):
+        raise GCPError("POST start 失败：HTTP 403 This API method requires billing to be enabled.")
+    a.start = no_billing
+    mgr.replace_cycle()
+    assert db.get_account(accs[0]["id"])["status"] == "banned"
+    rows = db.list_instances()
+    assert len(rows) == 1 and rows[0]["account_id"] == accs[1]["id"]
+
+
+def test_stopped_cannot_start_replaced_and_old_deleted(renv):
+    mgr, db, (a, b, c), accs = renv
+    iid = _stop_vm1(mgr, db, a, accs)
+
+    def exhausted(zone, name):
+        raise GCPError("POST start 失败：HTTP 503 ZONE_RESOURCE_POOL_EXHAUSTED")
+    a.start = exhausted
+    mgr.replace_cycle()
+    assert db.get_account(accs[0]["id"])["status"] == "ok"
+    assert ("asia-east1-b", "vm1") not in a.instances  # 旧实例已从云端删除
+    rows = db.list_instances()
+    assert len(rows) == 1 and rows[0]["account_id"] == accs[1]["id"]
+
+
+def test_stopped_zero_minutes_disabled(renv):
+    mgr, db, (a, b, c), accs = renv
+    iid = _stop_vm1(mgr, db, a, accs)
+    db.update_settings({"replace_stopped_minutes": 0})
+    mgr.replace_cycle()
+    assert db.get_instance(iid)["status"] == "TERMINATED" and not b.instances

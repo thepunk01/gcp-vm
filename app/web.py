@@ -589,7 +589,8 @@ def create_app(
                 data["panel_url"] = ""
         if "replace_enabled" in data:
             data["replace_enabled"] = bool(data["replace_enabled"])
-        for k, lo, hi in (("replace_max_per_account", 1, 100), ("replace_max_per_day", 1, 200)):
+        for k, lo, hi in (("replace_max_per_account", 1, 100), ("replace_max_per_day", 1, 200),
+                          ("replace_stopped_minutes", 0, 1440)):
             if k in data:
                 data[k] = int(data[k])
                 if not lo <= data[k] <= hi:

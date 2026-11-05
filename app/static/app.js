@@ -1180,6 +1180,15 @@ $("#tg-test").addEventListener("click", (e) => busy(e.currentTarget, async () =>
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.currentTarget;
+  // 浏览器自带的表单校验会静默拦截提交（出错的输入框可能在别的模板或页面下方），这里自己检查并指出是哪一项
+  const bad = $$("input, select, textarea", f).find((el) => !el.checkValidity());
+  if (bad) {
+    const label = (bad.closest("label")?.childNodes[0]?.textContent || bad.name || bad.dataset.t || "").trim();
+    const where = bad.closest("#replace-sec") ? `（替补模板「${S.tplCur || "默认"}」）` : "";
+    bad.scrollIntoView({ behavior: "smooth", block: "center" });
+    bad.focus();
+    return toast(`无法保存：${label}${where} ${bad.validationMessage}`, true);
+  }
   saveTpl();
   const body = {
     detect_mode: f.querySelector("[name=detect_mode]:checked")?.value || "agent",

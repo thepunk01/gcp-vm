@@ -609,8 +609,9 @@ def create_app(
                     clean_t[k] = int(v or dv)
                 else:
                     clean_t[k] = str(v or "").strip() if k != "startup_script" else str(v or "")[:65536]
-            if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", clean_t["name_prefix"] or "x"):
-                raise ValueError(f"{label}：实例名前缀只能用小写字母、数字和短横线，以字母开头")
+            # 实例名前缀自动规范化（GCP 只允许小写字母、数字、短横线，且以字母开头），不再因为大写等原因保存失败
+            px = re.sub(r"[^a-z0-9-]+", "-", clean_t["name_prefix"].lower()).strip("-")[:40] or "gcp"
+            clean_t["name_prefix"] = px if px[0].isalpha() else f"vm-{px}"[:40]
             if clean_t["zone"] and not re.fullmatch(r"[a-z]+-[a-z]+\d+-[a-z]", clean_t["zone"]):
                 raise ValueError(f"{label}：可用区格式不正确，例如 asia-east1-b")
             if not 1 <= clean_t["check_port"] <= 65535:

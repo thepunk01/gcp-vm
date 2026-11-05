@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 
-def send_telegram(settings: dict, text: str) -> bool:
+def send_telegram(settings: dict, text: str, html: bool = False) -> bool:
     token = settings.get("telegram_bot_token")
     chat_id = settings.get("telegram_chat_id")
     if not token or not chat_id:
@@ -18,7 +18,8 @@ def send_telegram(settings: dict, text: str) -> bool:
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+            | ({"parse_mode": "HTML"} if html else {}),
             timeout=15,
         )
         if resp.status_code != 200:

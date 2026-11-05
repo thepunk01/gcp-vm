@@ -20,7 +20,7 @@ def rep(db):
                         "report_chat_id": "-100777"})
     hub = TrafficHub()
     sent = []
-    r = Reporter(db, hub, sender=lambda s, text: sent.append((s["telegram_chat_id"], text)) or True)
+    r = Reporter(db, hub, sender=lambda s, text, html=False: sent.append((s["telegram_chat_id"], text)) or True)
     return r, hub, db, insts, sent
 
 
@@ -56,8 +56,9 @@ def test_peaks_counts_and_scheduled_send(rep):
     assert r.tick(ts(9, 0, 30)) is False  # 同一个时间点只发一次
     chat, text = sent[0]
     assert chat == "-100777"
-    assert "台湾入口" in text and "↓ 100 Mbps" in text and "↑ 50.0 Mbps" in text
-    assert "更换 IP：2 次，替补 1 次" in text and "（自动 1 次）" in text
+    assert "<b>台湾入口</b>" in text and "峰值下行　<code>100 Mbps</code>" in text and "峰值上行　<code>50.0 Mbps</code>" in text
+    assert "更换 IP　<code>2 次</code>　替补 <code>1</code> 次" in text and "（自动 1 次）" in text
+    assert "共 1 小时" in text
     assert all(v == {"rx": 0, "tx": 0} for v in r.peaks.values()) and r.since == ts(9, 0, 1)  # 新周期
     # 状态持久化，重启后恢复
     r2 = Reporter(db, hub)
@@ -72,3 +73,17 @@ def test_disabled_and_preview(rep):
     assert r.send(reset=False)
     assert r.peaks  # 预览不清空
     assert sent[0][0] == "-100777"
+
+
+def test_live_rate_floor_and_html_escape(rep):
+    import time as _t
+    r, hub, db, insts, sent = rep
+    iid = insts[0]["id"]
+    db.update_instance_config(iid, {"grp": "A<b> 仅限协议：AnyTLS"})
+    now = _t.time()
+    hub.report(iid, 0, 0, now=now - 10)
+    hub.report(iid, 12_500_000, 12_500_000, now=now - 1)
+    r.peaks = {}
+    text = r.build(db.get_settings(), now)  # 没有采样过，也应取实时速率
+    assert "<code>11.1 Mbps</code>" in text
+    assert "A&lt;b&gt;" in text and "<i>仅限协议：AnyTLS</i>" in text

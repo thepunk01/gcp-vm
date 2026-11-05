@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import threading
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 TZ = timezone(timedelta(hours=8))  # 北京时间
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 TOTAL = "__total__"
+esc = html.escape
 
 
 def fmt_bps(bps: float) -> str:
@@ -85,9 +87,11 @@ class Reporter:
         """每 2 秒调用：采样、定期存盘、到点发送。返回本次是否发送了报告。"""
         now = now or time.time()
         settings = self.db.get_settings()
+        self.sample(now)  # 不论是否开启都持续采样，开启后第一份报告也有数据
         if not settings.get("report_enabled"):
+            if now - self._saved_at >= 60:
+                self._save()
             return False
-        self.sample(now)
         sent = False
         local = datetime.fromtimestamp(now, TZ)
         hm = local.strftime("%H:%M")
@@ -127,8 +131,19 @@ class Reporter:
                     row(k)["replace"] += 1
         return out
 
+    @staticmethod
+    def _span(since: float, now: float) -> str:
+        a, b = datetime.fromtimestamp(since, TZ), datetime.fromtimestamp(now, TZ)
+        right = f"{b:%H:%M}" if a.date() == b.date() else f"{b:%m-%d %H:%M}"
+        mins = int((now - since) // 60)
+        dur = "不到 1 分钟" if mins < 1 else f"{mins} 分钟" if mins < 60 else (
+            f"{mins // 60} 小时" + (f" {mins % 60} 分" if mins % 60 else ""))
+        return f"{a:%m-%d %H:%M} → {right}　共 {dur}"
+
     def build(self, settings: dict, now: float | None = None) -> str:
+        """Telegram HTML 卡片。峰值至少取发送这一刻的实时速率，避免刚开始统计时全是 0。"""
         now = now or time.time()
+        self.sample(now)
         with self._lock:
             peaks = {k: dict(v) for k, v in self.peaks.items()}
             since = self.since
@@ -136,39 +151,44 @@ class Reporter:
         groups = self.traffic.groups(self.db.list_instances(), now)
         show_peak = settings.get("report_peaks", True)
         show_ip = settings.get("report_ip_changes", True)
-        start, end = datetime.fromtimestamp(since, TZ), datetime.fromtimestamp(now, TZ)
-        hours = (now - since) / 3600
         title = (settings.get("report_title") or "").strip() or "线路运行报告"
-        lines = [f"【{title}】", f"{start:%m-%d %H:%M} ~ {end:%m-%d %H:%M}（{hours:.1f} 小时）", ""]
+        zero = {"ip": 0, "ip_auto": 0, "replace": 0}
+        out = [f"<b>📊 {esc(title)}</b>", f"<i>{self._span(since, now)}</i>", ""]
         for g in groups:
             p = peaks.get(g["name"], {"rx": 0, "tx": 0})
-            c = counts.get(g["name"], {"ip": 0, "ip_auto": 0, "replace": 0})
-            lines.append(f"▍{g['name']}　在线 {g['online']}/{g['total']}")
+            c = counts.get(g["name"], zero)
+            dot = "🟢" if g["online"] == g["total"] else "🟡" if g["online"] else "🔴"
+            head, _, sub = g["name"].partition(" ")
+            out.append(f"{dot} <b>{esc(head)}</b>　<code>在线 {g['online']}/{g['total']}</code>")
+            if sub.strip():
+                out.append(f"<i>{esc(sub.strip())}</i>")
             if show_peak:
-                lines.append(f"　峰值带宽：↓ {fmt_bps(p['rx'])}　↑ {fmt_bps(p['tx'])}")
+                out.append(f"├ 峰值下行　<code>{fmt_bps(p['rx'])}</code>")
+                out.append(f"{'├' if show_ip else '└'} 峰值上行　<code>{fmt_bps(p['tx'])}</code>")
             if show_ip:
-                extra = f"，替补 {c['replace']} 次" if c["replace"] else ""
-                lines.append(f"　更换 IP：{c['ip']} 次{extra}")
-            lines.append("")
+                extra = f"　替补 <code>{c['replace']}</code> 次" if c["replace"] else ""
+                out.append(f"└ 更换 IP　<code>{c['ip']} 次</code>{extra}")
+            out.append("")
         t = peaks.get(TOTAL, {"rx": 0, "tx": 0})
-        c = counts.get(TOTAL, {"ip": 0, "ip_auto": 0, "replace": 0})
-        summary = []
-        if show_peak:
-            summary.append(f"总峰值 ↓ {fmt_bps(t['rx'])} ↑ {fmt_bps(t['tx'])}")
-        if show_ip:
-            summary.append(f"更换 IP 共 {c['ip']} 次（自动 {c['ip_auto']} 次）")
-            if c["replace"]:
-                summary.append(f"自动替补 {c['replace']} 次")
-        if summary:
-            lines.append("合计：" + "；".join(summary))
-        return "\n".join(lines).strip()
+        c = counts.get(TOTAL, zero)
+        if show_peak or show_ip:
+            out.append("━━━━━━━━━━━━━━")
+            out.append("<b>合计</b>")
+            if show_peak:
+                out.append(f"峰值　<code>↓ {fmt_bps(t['rx'])}　↑ {fmt_bps(t['tx'])}</code>")
+            if show_ip:
+                line = f"换 IP　<code>{c['ip']} 次</code>（自动 {c['ip_auto']} 次）"
+                if c["replace"]:
+                    line += f"　替补 <code>{c['replace']} 次</code>"
+                out.append(line)
+        return "\n".join(out).strip()
 
     def send(self, settings: dict | None = None, now: float | None = None, reset: bool = False) -> bool:
         settings = settings or self.db.get_settings()
         now = now or time.time()
         text = self.build(settings, now)
         chat = (settings.get("report_chat_id") or "").strip() or settings.get("telegram_chat_id")
-        ok = self.sender(settings | {"telegram_chat_id": chat}, text)
+        ok = self.sender(settings | {"telegram_chat_id": chat}, text, True)
         if reset and ok:
             with self._lock:
                 self.since = now

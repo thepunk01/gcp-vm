@@ -89,7 +89,7 @@ const CN = { ok: ["国内可达", "ok"], blocked: ["疑似被墙", "bad"], down:
 const EVT = {
   alert: "服务监控", blocked: "被墙", server: "服务器", create: "新建实例", delete: "删除实例", firewall: "防火墙", exec: "执行命令",
   startup: "启动脚本", start: "开机", stop: "关机", reset: "重启", change_ip: "换 IP", change_ip_auto: "自动换 IP", auto_start: "自动开机",
-  check: "检测", dns: "DNS", sync: "同步", account: "账号", replace: "自动替补", replace_new: "替补完成",
+  check: "检测", dns: "DNS", sync: "同步", account: "账号", replace: "自动替补", replace_new: "替补完成", report: "定时报告",
 };
 const isManual = (i) => i.provider === "manual";
 const isAzure = (i) => i.provider === "azure";
@@ -1113,7 +1113,7 @@ async function loadSettings(sub) {
     S.pushStatus = Object.fromEntries(push.map((p) => [p.name, p]));
     const f = $("#settings-form");
     for (const [k, v] of Object.entries(s)) {
-      if (["probes", "push_probes", "script_presets", "replace_template", "panel_url"].includes(k)) continue;
+      if (["probes", "push_probes", "script_presets", "replace_template", "replace_templates", "panel_url", "report_state"].includes(k)) continue;
       if (k === "detect_mode") { $$("[name=detect_mode]", f).forEach((r) => (r.checked = r.value === v)); continue; }
       const el = f.elements[k];
       if (!el || !el.tagName) continue;
@@ -1201,6 +1201,12 @@ $("#settings-form").addEventListener("submit", async (e) => {
     watch_service: f.watch_service.value.trim(),
     service_alert_seconds: +f.service_alert_seconds.value || 60,
     panel_url: location.origin,
+    report_enabled: f.report_enabled.checked,
+    report_chat_id: f.report_chat_id.value.trim(),
+    report_times: f.report_times.value.trim(),
+    report_title: f.report_title.value.trim(),
+    report_peaks: f.report_peaks.checked,
+    report_ip_changes: f.report_ip_changes.checked,
     replace_enabled: f.replace_enabled.checked,
     replace_max_per_account: +f.replace_max_per_account.value || 3,
     replace_max_per_day: +f.replace_max_per_day.value || 6,
@@ -1263,6 +1269,10 @@ $("#tpl-del").addEventListener("click", () => {
   renderTplSelect();
   showTpl("");
   markDirty();
+});
+$("#report-send").addEventListener("click", (e) => {
+  if ($(".savebar").classList.contains("dirty")) return toast("请先保存设置，再发送预览", true);
+  busy(e.currentTarget, async () => toast((await api("/api/report/send", { method: "POST" })).message));
 });
 $("#replace-create").addEventListener("click", (e) => {
   if ($(".savebar").classList.contains("dirty")) return toast("请先保存设置，再按模板新建", true);

@@ -109,6 +109,14 @@ DEFAULT_SETTINGS: dict = {
     },
     # 按分组的替补模板：{"台湾入口": {...同 replace_template...}}；分组没有专属模板时用 replace_template
     "replace_templates": {},
+    # 定时 Telegram 报告（北京时间）：各分组峰值带宽、换 IP 次数
+    "report_enabled": False,
+    "report_chat_id": "",          # 群组 Chat ID（如 -100xxxx），留空用通知的 Chat ID
+    "report_times": "09:00,21:00",
+    "report_title": "AtomicGCP 线路运行报告",
+    "report_peaks": True,
+    "report_ip_changes": True,
+    "report_state": {},            # 内部：本周期峰值与起始时间
     # 「执行命令」里的常用脚本：[{"name": "...", "script": "..."}]
     "script_presets": [
         {

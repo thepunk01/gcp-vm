@@ -73,6 +73,8 @@ def create_app(
     manager = manager or Manager(db)
     auth = Auth(password if password is not None else config.ADMIN_PASSWORD, config.secret_key(), config.TOKEN_TTL_HOURS)
     run_monitor = config.ENABLE_MONITOR if enable_monitor is None else enable_monitor
+    from .report import Reporter
+    reporter = Reporter(db, manager.traffic)
     HUB.configure(
         db.get_settings,
         lambda: [
@@ -148,6 +150,13 @@ def create_app(
     async def reset_account_status(request: Request):
         await asyncio.to_thread(manager.reset_account_status, int_param(request))
         return JSONResponse({"ok": True})
+
+    @protected
+    async def report_send(_: Request):
+        ok = await asyncio.to_thread(reporter.send, None, None, False)
+        if not ok:
+            raise ValueError("发送失败：请检查 Bot Token、群组 Chat ID，并确认机器人已加入该群组")
+        return JSONResponse({"ok": True, "message": "已发送（预览，不影响定时统计）"})
 
     @protected
     async def replace_create(request: Request):
@@ -587,6 +596,17 @@ def create_app(
                 data["panel_url"] = normalize_panel_url(str(data["panel_url"])) if data["panel_url"] else ""
             except ValueError:
                 data["panel_url"] = ""
+        data.pop("report_state", None)  # 内部状态，不允许从接口改
+        if "report_times" in data:
+            from .report import parse_times
+            data["report_times"] = ",".join(parse_times(data["report_times"]))
+        for k in ("report_enabled", "report_peaks", "report_ip_changes"):
+            if k in data:
+                data[k] = bool(data[k])
+        if "report_chat_id" in data:
+            data["report_chat_id"] = str(data["report_chat_id"] or "").strip()[:40]
+        if "report_title" in data:
+            data["report_title"] = str(data["report_title"] or "").strip()[:60]
         if "replace_enabled" in data:
             data["replace_enabled"] = bool(data["replace_enabled"])
         for k, lo, hi in (("replace_max_per_account", 1, 100), ("replace_max_per_day", 1, 200),
@@ -676,6 +696,15 @@ def create_app(
             interval = max(30, int(db.get_settings().get("check_interval", 300)))
             await asyncio.sleep(max(5, interval - (time.time() - started)))
 
+    async def report_loop():
+        await asyncio.sleep(15)
+        while True:
+            try:
+                await asyncio.to_thread(reporter.tick)
+            except Exception:  # noqa: BLE001
+                log.exception("定时报告出错")
+            await asyncio.sleep(2)
+
     async def alert_loop():
         await asyncio.sleep(10)
         while True:
@@ -689,7 +718,7 @@ def create_app(
     async def lifespan(_app):
         if not auth.password:
             log.warning("未设置 GCPVM_ADMIN_PASSWORD，将无法登录控制台！")
-        tasks = [asyncio.create_task(monitor_loop()), asyncio.create_task(alert_loop())] if run_monitor else []
+        tasks = [asyncio.create_task(c()) for c in (monitor_loop, alert_loop, report_loop)] if run_monitor else []
         try:
             yield
         finally:
@@ -715,6 +744,7 @@ def create_app(
         Route("/api/accounts/{id}", delete_account, methods=["DELETE"]),
         Route("/api/accounts/{id}/reset-status", reset_account_status, methods=["POST"]),
         Route("/api/replace/create", replace_create, methods=["POST"]),
+        Route("/api/report/send", report_send, methods=["POST"]),
         Route("/api/servers", add_server, methods=["POST"]),
         Route("/api/servers/bootstrap.sh", server_bootstrap_sh),
         Route("/api/servers/{id}", update_server, methods=["PATCH"]),

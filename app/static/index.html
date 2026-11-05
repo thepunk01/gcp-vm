@@ -273,6 +273,15 @@
               <label>Telegram Bot Token<input name="telegram_bot_token" autocomplete="off"></label>
               <label>Telegram Chat ID<input name="telegram_chat_id" autocomplete="off"></label>
               <div class="span2 inline"><button type="button" class="btn small" id="tg-test">发送测试通知</button><span class="muted small">用当前填写的内容测试，无需先保存</span></div>
+              <h3 class="span2">定时报告</h3>
+              <p class="muted small span2">按设定时间（北京时间）把本周期各分组的<b>峰值带宽</b>和<b>更换 IP 次数</b>推送到 Telegram 群组，推送后重新开始统计。把机器人拉进群组，群组 Chat ID 一般是 -100 开头（可以把群消息转发给 @userinfobot 查看）。</p>
+              <label class="check span2"><input type="checkbox" name="report_enabled"> 开启定时报告</label>
+              <label>群组 Chat ID（留空则发到上面的 Chat ID）<input name="report_chat_id" placeholder="-1001234567890" autocomplete="off"></label>
+              <label>推送时间（北京时间，多个用逗号分隔）<input name="report_times" placeholder="09:00,21:00"></label>
+              <label class="span2">报告标题<input name="report_title" maxlength="60"></label>
+              <label class="check"><input type="checkbox" name="report_peaks"> 峰值带宽</label>
+              <label class="check"><input type="checkbox" name="report_ip_changes"> 更换 IP 次数</label>
+              <div class="span2 inline"><button type="button" class="btn small" id="report-send">立即发送一次（预览）</button><span class="muted small">按已保存的设置发送当前周期的数据，不影响定时统计</span></div>
             </div>
 
             <div class="card form-grid sec" data-sec="monitor">

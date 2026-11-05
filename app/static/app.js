@@ -1221,6 +1221,9 @@ function showTpl(key) {
   const tpl = { ...S.tpls[""], ...(S.tpls[key] || {}) };
   $$("#replace-sec [data-t]").forEach((el) => {
     const v = tpl[el.dataset.t] ?? (el.dataset.t === "follow_original" ? true : undefined);
+    if (el.tagName === "SELECT" && v && ![...el.options].some((o) => o.value === v)) {
+      el.add(new Option(`${v}（已保存的值）`, v));  // 列表里没有的旧值也保留
+    }
     if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
   });
   $("#tpl-group").value = key;

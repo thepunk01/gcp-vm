@@ -116,7 +116,6 @@ DEFAULT_SETTINGS: dict = {
     "report_title": "AtomicGCP 线路运行报告",
     "report_peaks": True,
     "report_ip_changes": True,
-    "report_total": False,         # 是否附带「合计」一栏
     "report_state": {},            # 内部：本周期峰值与起始时间
     # 「执行命令」里的常用脚本：[{"name": "...", "script": "..."}]
     "script_presets": [

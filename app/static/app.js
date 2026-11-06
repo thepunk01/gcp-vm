@@ -1254,7 +1254,6 @@ $("#settings-form").addEventListener("submit", async (e) => {
     report_title: f.report_title.value.trim(),
     report_peaks: f.report_peaks.checked,
     report_ip_changes: f.report_ip_changes.checked,
-    report_total: f.report_total.checked,
     replace_enabled: f.replace_enabled.checked,
     replace_max_per_account: +f.replace_max_per_account.value || 3,
     replace_max_per_day: +f.replace_max_per_day.value || 6,

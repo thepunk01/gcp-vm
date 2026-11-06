@@ -169,18 +169,6 @@ class Reporter:
                 extra = f"　替补 <code>{c['replace']}</code> 次" if c["replace"] else ""
                 out.append(f"└ 更换 IP　<code>{c['ip']} 次</code>{extra}")
             out.append("")
-        t = peaks.get(TOTAL, {"rx": 0, "tx": 0})
-        c = counts.get(TOTAL, zero)
-        if settings.get("report_total", False) and (show_peak or show_ip):
-            out.append("━━━━━━━━━━━━━━")
-            out.append("<b>合计</b>")
-            if show_peak:
-                out.append(f"峰值　<code>↓ {fmt_bps(t['rx'])}　↑ {fmt_bps(t['tx'])}</code>")
-            if show_ip:
-                line = f"换 IP　<code>{c['ip']} 次</code>（自动 {c['ip_auto']} 次）"
-                if c["replace"]:
-                    line += f"　替补 <code>{c['replace']} 次</code>"
-                out.append(line)
         return "\n".join(out).strip()
 
     def send(self, settings: dict | None = None, now: float | None = None, reset: bool = False) -> bool:

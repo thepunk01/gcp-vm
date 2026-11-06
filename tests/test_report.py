@@ -17,7 +17,7 @@ def rep(db):
     insts = db.list_instances()
     db.update_instance_config(insts[0]["id"], {"grp": "台湾入口"})
     db.update_settings({"report_enabled": True, "report_times": "09:00", "telegram_bot_token": "t", "telegram_chat_id": "1",
-                        "report_chat_id": "-100777", "report_total": True})
+                        "report_chat_id": "-100777"})
     hub = TrafficHub()
     sent = []
     r = Reporter(db, hub, sender=lambda s, text, html=False: sent.append((s["telegram_chat_id"], text)) or True)
@@ -57,7 +57,7 @@ def test_peaks_counts_and_scheduled_send(rep):
     chat, text = sent[0]
     assert chat == "-100777"
     assert "<b>台湾入口</b>" in text and "峰值下行　<code>100 Mbps</code>" in text and "峰值上行　<code>50.0 Mbps</code>" in text
-    assert "更换 IP　<code>2 次</code>　替补 <code>1</code> 次" in text and "（自动 1 次）" in text
+    assert "更换 IP　<code>2 次</code>　替补 <code>1</code> 次" in text and "合计" not in text
     assert "共 1 小时" in text
     assert all(v == {"rx": 0, "tx": 0} for v in r.peaks.values()) and r.since == ts(9, 0, 1)  # 新周期
     # 状态持久化，重启后恢复
@@ -91,5 +91,4 @@ def test_live_rate_floor_and_html_escape(rep):
 
 def test_total_hidden_by_default(rep):
     r, hub, db, insts, sent = rep
-    db.update_settings({"report_total": False})
     assert "合计" not in r.build(db.get_settings())

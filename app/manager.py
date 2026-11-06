@@ -185,15 +185,14 @@ class Manager:
             lock.release()
 
     def _note_account_error(self, inst: dict, e: Exception) -> None:
-        """操作失败且是账号级错误：结算停用 / 项目暂停立即判定账号停用，其他（如 401/403）累计到上限再判定。
-        判定后自动替补会接手该账号下勾选了替补的实例。"""
+        """操作失败且是账号级错误（结算停用 / 项目暂停 / 无权限）：连续出现 ACCOUNT_FAIL_LIMIT 次判定账号停用。
+        只出现一次不判定，避免 GCP 偶发的结算校验错误把整个账号的机器都替补掉。判定后由自动替补接手。"""
         if inst.get("provider") != "gcp" or not self._is_account_fatal(e):
             return
         acc = self.db.get_account(inst["account_id"], with_key=False)
         if not acc or acc.get("status") == "banned":
             return
-        low = str(e).lower()
-        n = self.ACCOUNT_FAIL_LIMIT if ("billing" in low or "suspend" in low) else self._acct_fails.get(acc["id"], 0) + 1
+        n = self._acct_fails.get(acc["id"], 0) + 1
         self._acct_fails[acc["id"]] = n
         if n < self.ACCOUNT_FAIL_LIMIT:
             return
@@ -541,7 +540,8 @@ class Manager:
         if not (inst["auto_ip"] or inst["auto_start"]):
             return
         client = self._client(inst["account_id"])
-        inst = self._refresh(inst, client)
+        provider = inst.get("provider", "gcp")
+        inst = self._refresh(inst, client) | {"provider": provider}
 
         # 自动开机（如 Spot/抢占式实例被回收）
         if inst["status"] in STOPPED_STATES:
@@ -554,6 +554,15 @@ class Manager:
             return
 
         if not inst["auto_ip"] or inst["status"] != "RUNNING":
+            return
+
+        # 没有外网 IP（例如上次换 IP 删掉旧 IP 后加新 IP 失败）：先补回一个
+        if not inst["external_ip"] and inst.get("provider") == "gcp":
+            self._event(inst, "change_ip", "实例没有外网 IP（可能上次换 IP 中途失败），尝试重新分配", "warn")
+            try:
+                self.change_ip(inst["id"], reason="重新分配外网 IP")
+            except ManagerError:
+                pass
             return
 
         result = self.checker_cls(settings).check(inst["external_ip"], inst["check_port"])

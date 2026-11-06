@@ -534,8 +534,12 @@ def test_change_ip_billing_disabled_bans_account_then_replaces(renv):
         raise GCPError("POST addAccessConfig 失败：HTTP 403 This API method requires billing to be enabled.")
     a.add_access_config = no_billing
     db.update_instance_config(inst["id"], {"ip_mode": "ephemeral"})
+    db.update_instance_config(inst["id"], {"auto_ip": True})
     with pytest.raises(ManagerError):
         mgr.change_ip(inst["id"], reason="自动-被墙")
+    assert db.get_account(accs[0]["id"])["status"] == "ok"  # 只失败一次不判定
+    assert not a.instances[("asia-east1-b", "vm1")].get("external_ip")  # 旧 IP 已删、新 IP 没加上
+    mgr.process_instance(db.get_instance(inst["id"]), db.get_settings())  # 下一轮尝试补回，再次失败
     assert db.get_account(accs[0]["id"])["status"] == "banned"
     assert any("已判定为停用" in e["message"] for e in db.list_events())
     mgr.replace_cycle()
@@ -552,4 +556,21 @@ def test_single_403_does_not_ban(renv):
     a.start = denied
     with pytest.raises(ManagerError):
         mgr.power(inst["id"], "start")
+    assert db.get_account(accs[0]["id"])["status"] == "ok"
+
+
+def test_missing_ip_is_restored_when_billing_recovers(renv):
+    mgr, db, (a, b, c), accs = renv
+    inst = db.list_instances()[0]
+    db.update_instance_config(inst["id"], {"auto_ip": True, "ip_mode": "ephemeral"})
+    real = a.add_access_config
+
+    def no_billing(*args, **kw):
+        raise GCPError("POST addAccessConfig 失败：HTTP 403 This API method requires billing to be enabled.")
+    a.add_access_config = no_billing
+    with pytest.raises(ManagerError):
+        mgr.change_ip(inst["id"], reason="自动-被墙")
+    a.add_access_config = real  # 结算恢复
+    mgr.process_instance(db.get_instance(inst["id"]), db.get_settings())
+    assert db.get_instance(inst["id"])["external_ip"]
     assert db.get_account(accs[0]["id"])["status"] == "ok"

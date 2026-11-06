@@ -547,7 +547,7 @@ function renderExtras(i) {
 }
 $("#extra-add").addEventListener("click", (e) => {
   const i = byId(drawerId);
-  if (!confirm(`给「${i.name}」添加一个附加 IP？\n所有端口都会转发到这台机器，约 $3.6/月。`)) return;
+  if (!confirm(`给「${i.name}」添加一个附加 IP？\n所有端口都会转发到这台机器。费用：IP 约 $3.6/月 + 转发规则费（前 5 条合计约 $18/月，之后每条约 $7.3/月）。`)) return;
   busy(e.currentTarget, async () => {
     toast("正在添加，验证新 IP 可能需要 1 分钟左右…");
     const x = await api(`/api/instances/${i.id}/extra-ips`, { method: "POST" });

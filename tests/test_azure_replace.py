@@ -510,3 +510,17 @@ def test_stopped_zero_minutes_disabled(renv):
     db.update_settings({"replace_stopped_minutes": 0})
     mgr.replace_cycle()
     assert db.get_instance(iid)["status"] == "TERMINATED" and not b.instances
+
+
+def test_replace_recreates_extra_ips(renv):
+    mgr, db, (a, b, c), accs = renv
+    old = db.list_instances()[0]
+    mgr.add_extra_ip(old["id"])
+    mgr.add_extra_ip(old["id"])
+    del a.instances[("asia-east1-b", "vm1")]
+    mgr.replace_cycle()
+    new = db.list_instances()[0]
+    assert new["account_id"] == accs[1]["id"]
+    assert len(db.list_extra_ips(new["id"])) == 2 and len(b.rules) == 2
+    assert a.rules == {} and a.targets == {}  # 旧账号里的附加 IP 已清理
+    assert any("附加 IP" in e["message"] and e["type"] == "replace_new" for e in db.list_events())

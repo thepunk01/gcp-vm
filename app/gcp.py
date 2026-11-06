@@ -384,6 +384,51 @@ class GCPClient:
         self._wait(op)
 
 
+    # ---------------- 附加 IP（协议转发） ----------------
+    def ensure_target_instance(self, zone: str, instance: str, name: str) -> str:
+        """确保指向实例的目标实例（NO_NAT）存在，返回其 selfLink。"""
+        path = f"projects/{self.project}/zones/{zone}/targetInstances/{quote(name)}"
+        try:
+            return self._request("GET", path)["selfLink"]
+        except GCPError as e:
+            if "HTTP 404" not in str(e):
+                raise
+        op = self._request(
+            "POST", f"projects/{self.project}/zones/{zone}/targetInstances",
+            body={"name": name, "natPolicy": "NO_NAT",
+                  "instance": f"projects/{self.project}/zones/{zone}/instances/{instance}"},
+        )
+        self._wait(op)
+        return self._request("GET", path)["selfLink"]
+
+    def delete_target_instance(self, zone: str, name: str) -> None:
+        try:
+            op = self._request("DELETE", f"projects/{self.project}/zones/{zone}/targetInstances/{quote(name)}")
+            self._wait(op)
+        except GCPError as e:
+            if "HTTP 404" not in str(e):
+                raise
+
+    def insert_forwarding_rule(self, region: str, name: str, ip: str, target: str, tier: str | None = None) -> None:
+        """外部协议转发：所有协议、所有端口转发到目标实例，实例收到的目的地址就是这个 IP。"""
+        body: dict[str, Any] = {
+            "name": name, "IPAddress": ip, "IPProtocol": "L3_DEFAULT", "allPorts": True,
+            "target": target, "loadBalancingScheme": "EXTERNAL",
+        }
+        if tier:
+            body["networkTier"] = tier
+        op = self._request("POST", f"projects/{self.project}/regions/{region}/forwardingRules", body=body)
+        self._wait(op)
+
+    def delete_forwarding_rule(self, region: str, name: str) -> None:
+        try:
+            op = self._request("DELETE", f"projects/{self.project}/regions/{region}/forwardingRules/{quote(name)}")
+            self._wait(op)
+        except GCPError as e:
+            if "HTTP 404" not in str(e):
+                raise
+
+
 class ClientPool:
     """按账号 id 缓存客户端（缓存访问令牌）。GCP 账号用 GCPClient，Azure 账号用 AzureClient。"""
 

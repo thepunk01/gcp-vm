@@ -116,6 +116,8 @@ function issuesOf(i) {
   if (i.status === "LOST") return [["bad", "实例已不存在", `云端找不到该实例${i.auto_replace ? "，等待自动替补" : ""}`]];
   if (i.cn_state === "blocked") out.push(["bad", "疑似被墙", `${i.external_ip}:${i.check_port} 国内不可达 · 连续 ${i.fail_count} 次${isManual(i) ? " · 需手动换 IP" : ""}`]);
   else if (i.cn_state === "down") out.push(["warn", "服务不可达", `${i.external_ip}:${i.check_port} 国内外都不通`]);
+  (i.extra_ips || []).filter((x) => x.cn_state === "blocked").forEach((x) =>
+    out.push(["bad", "附加 IP 疑似被墙", `${x.ip}:${i.check_port} 国内不可达 · 连续 ${x.fail_count} 次`]));
   if (!isManual(i) && STOPPED.includes(i.status)) out.push(["warn", "已关机", i.auto_start ? "等待自动开机" : "未开启自动开机"]);
   if (r && r.last_seen && !r.online && (isManual(i) || i.status === "RUNNING")) out.push(["bad", "失联", `上报中断 · 最后上报 ${fmtAgo(r.last_seen)}`]);
   else if (r && r.online && ["inactive", "failed"].includes(r.svc)) out.push(["bad", "服务已停止", `${(S.settings && S.settings.watch_service) || "服务"} 状态 ${r.svc}`]);
@@ -348,7 +350,7 @@ function filtered() {
     if (S.filter === "manual" && !isManual(i)) return false;
     if (S.filter === "issue" && !issuesOf(i).length) return false;
     if (!q) return true;
-    return [i.name, i.external_ip, i.grp, i.zone, i.note].some((v) => String(v || "").toLowerCase().includes(q));
+    return [i.name, i.external_ip, i.grp, i.zone, i.note, ...(i.extra_ips || []).map((x) => x.ip)].some((v) => String(v || "").toLowerCase().includes(q));
   });
 }
 function rateCell(i) {
@@ -381,7 +383,7 @@ function renderInstances() {
       : `${isAzure(i) ? "Azure · " : ""}${esc(i.zone)} · ${esc(i.machine_type)}${i.preemptible ? " · Spot" : ""}`;
     return `<tr class="click${drawerId === i.id ? " sel" : ""}" data-id="${i.id}">
       <td data-l="实例"><div><div class="name">${esc(i.name)}</div><div class="sub">${sub}</div></div></td>
-      <td data-l="IP"><span class="ip" data-copy="${esc(i.external_ip)}" title="点击复制">${esc(i.external_ip) || "<span class='muted'>无外网 IP</span>"}</span></td>
+      <td data-l="IP"><span class="ip" data-copy="${esc(i.external_ip)}" title="点击复制">${esc(i.external_ip) || "<span class='muted'>无外网 IP</span>"}</span>${(i.extra_ips || []).length ? `<span class="ip-more" title="${esc(i.extra_ips.map((x) => x.ip).join("\n"))}">+${i.extra_ips.length} IP</span>` : ""}</td>
       <td data-l="状态"><span class="badge ${i.account_status === "banned" ? "bad" : stc}" data-st="${i.id}">${i.account_status === "banned" ? "账号被封" : st}</span></td>
       <td data-l="国内"><span class="badge ${cnc}" title="上次检测 ${fmtTime(i.last_check)}">${cn}${i.cn_state === "blocked" ? ` ${i.fail_count}` : ""}</span></td>
       <td data-l="速率"><div style="display:flex;align-items:center;gap:10px"><svg class="spark" data-id="${i.id}" viewBox="0 0 92 26" preserveAspectRatio="none" aria-hidden="true"></svg><div data-rate="${i.id}">${rateCell(i)}</div></div></td>
@@ -508,6 +510,7 @@ function renderDrawer() {
     ["上次检测", fmtTime(i.last_check)], ["上次换 IP", fmtTime(i.last_change_at)], ["项目", i.account_name], ["备注", i.note || "-"],
   ];
   $("#d-kv").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
+  renderExtras(i);
   $("#sub-startup-btn").classList.toggle("hidden", i.provider !== "gcp");
   $("#exec-note").innerHTML = isAzure(i)
     ? `以 root 身份通过 SSH 执行 bash 脚本。首次执行会通过 Azure「运行命令」自动写入面板公钥（约 30-60 秒），需要网络安全组放行 22 端口（面板新建的实例默认全部放行）。`
@@ -528,6 +531,50 @@ function renderDrawerLive() {
     : svc ? `<span style="color:var(--${svc[1]})">${svc[0].replace("服务", "")}</span>` : `<span class="muted">未监控</span>`;
   drawChart($("#d-chart"), S.instHist[i.id] || []);
 }
+function renderExtras(i) {
+  const box = $("#d-extra-box");
+  box.classList.toggle("hidden", i.provider !== "gcp" || isGone(i));
+  if (box.classList.contains("hidden")) return;
+  const list = i.extra_ips || [];
+  $("#d-extras").innerHTML = list.length ? list.map((x) => {
+    const [cn, cnc] = CN[x.cn_state] || CN.unknown;
+    return `<li data-x="${x.id}"><span class="ip" data-copy="${esc(x.ip)}" title="点击复制">${esc(x.ip)}</span>
+      <span class="badge ${cnc}" title="上次检测 ${fmtTime(x.last_check)}">${cn}${x.cn_state === "blocked" ? ` ${x.fail_count}` : ""}</span>
+      <span class="ops"><button class="btn small ghost" data-xact="check">检测</button>
+      <button class="btn small ghost danger" data-xact="change">换 IP</button>
+      <button class="btn small ghost danger" data-xact="del">删除</button></span></li>`;
+  }).join("") : `<li class="empty-line muted small">还没有附加 IP</li>`;
+}
+$("#extra-add").addEventListener("click", (e) => {
+  const i = byId(drawerId);
+  if (!confirm(`给「${i.name}」添加一个附加 IP？\n所有端口都会转发到这台机器，约 $3.6/月。`)) return;
+  busy(e.currentTarget, async () => {
+    toast("正在添加，验证新 IP 可能需要 1 分钟左右…");
+    const x = await api(`/api/instances/${i.id}/extra-ips`, { method: "POST" });
+    toast(`已添加附加 IP ${x.ip}`);
+    await loadInstances();
+  });
+});
+$("#d-extras").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-xact]");
+  if (!b) return;
+  const li = b.closest("[data-x]");
+  const id = li.dataset.x;
+  const ip = $(".ip", li).textContent;
+  const act = b.dataset.xact;
+  if (act === "change" && !confirm(`更换附加 IP ${ip}？旧 IP 会被释放，走这个 IP 的连接会中断。`)) return;
+  if (act === "del" && !confirm(`删除附加 IP ${ip}？`)) return;
+  await busy(b, async () => {
+    if (act === "del") {
+      await api(`/api/extra-ips/${id}`, { method: "DELETE" });
+      toast(`已删除 ${ip}`);
+    } else {
+      const r = await api(`/api/extra-ips/${id}`, { method: "POST", body: { action: act } });
+      toast(act === "change" ? `新 IP：${r.ip}` : `${ip}：${(CN[r.state] || [r.state])[0]}，${r.detail}`, r.state === "blocked");
+    }
+    await loadInstances();
+  });
+});
 async function loadDrawerEvents() {
   const id = drawerId;
   try {

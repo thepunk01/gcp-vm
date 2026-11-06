@@ -10,6 +10,7 @@ os.environ.setdefault("GCPVM_ENABLE_MONITOR", "0")
 import pytest  # noqa: E402
 
 from app.db import Database  # noqa: E402
+from app.gcp import GCPError  # noqa: E402
 
 FAKE_KEY = {
     "type": "service_account",
@@ -45,6 +46,8 @@ class FakeGCP:
         }
         self.calls = []
         self.fail_add = False
+        self.targets = {}  # 目标实例名 -> {instance, zone}
+        self.rules = {}  # 转发规则名 -> {ip, target}
 
     def _sum(self, zone, name):
         i = self.instances[(zone, name)]
@@ -145,7 +148,27 @@ class FakeGCP:
 
     def delete_instance(self, zone, name):
         self.calls.append(("delete", name))
+        if any(t["instance"] == name for t in self.targets.values()):
+            raise GCPError(f"DELETE instances/{name} 失败：HTTP 400 resource is already being used by targetInstance")
         del self.instances[(zone, name)]
+
+    # 附加 IP（协议转发）
+    def ensure_target_instance(self, zone, instance, name):
+        self.targets.setdefault(name, {"instance": instance, "zone": zone})
+        return f"https://x/zones/{zone}/targetInstances/{name}"
+
+    def delete_target_instance(self, zone, name):
+        self.calls.append(("delete_ti", name))
+        assert not any(r["target"].endswith("/" + name) for r in self.rules.values()), "目标实例仍被转发规则引用"
+        self.targets.pop(name, None)
+
+    def insert_forwarding_rule(self, region, name, ip, target, tier=None):
+        assert self.addresses[name]["address"] == ip
+        self.rules[name] = {"ip": ip, "target": target}
+
+    def delete_forwarding_rule(self, region, name):
+        self.calls.append(("delete_fr", name))
+        self.rules.pop(name, None)
 
     def list_firewalls(self):
         return list(self.firewalls.values())

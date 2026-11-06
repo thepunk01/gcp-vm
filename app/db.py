@@ -62,6 +62,19 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_inst ON events(instance_id, type, ts);
 
+CREATE TABLE IF NOT EXISTS extra_ips (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id    INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+    ip             TEXT NOT NULL DEFAULT '',
+    region         TEXT NOT NULL,
+    res_name       TEXT NOT NULL,      -- 静态地址与转发规则同名
+    cn_state       TEXT DEFAULT 'unknown',
+    fail_count     INTEGER DEFAULT 0,
+    last_check     REAL DEFAULT 0,
+    last_change_at REAL DEFAULT 0,
+    created_at     REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS blocked_ips (
     ip          TEXT NOT NULL,
     instance_id INTEGER,
@@ -384,6 +397,40 @@ class Database:
     def count_type_since(self, type_: str, since: float) -> int:
         row = self._one("SELECT COUNT(*) AS n FROM events WHERE type = ? AND ts >= ?", (type_, since))
         return int(row["n"]) if row else 0
+
+    # ---------------- extra ips ----------------
+    def add_extra_ip(self, instance_id: int, ip: str, region: str, res_name: str, cn_state: str = "unknown") -> dict:
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO extra_ips(instance_id, ip, region, res_name, cn_state, created_at, last_change_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (instance_id, ip, region, res_name, cn_state, time.time(), time.time()),
+            )
+            eid = cur.lastrowid
+        return self.get_extra_ip(eid)  # type: ignore[return-value]
+
+    def get_extra_ip(self, extra_id: int) -> dict | None:
+        return self._one("SELECT * FROM extra_ips WHERE id = ?", (extra_id,))
+
+    def list_extra_ips(self, instance_id: int | None = None) -> list[dict]:
+        if instance_id is None:
+            return self._all("SELECT * FROM extra_ips ORDER BY instance_id, id")
+        return self._all("SELECT * FROM extra_ips WHERE instance_id = ? ORDER BY id", (instance_id,))
+
+    def update_extra_ip(self, extra_id: int, **fields) -> dict:
+        allowed = {"ip", "res_name", "cn_state", "fail_count", "last_check", "last_change_at"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if sets:
+            with self.tx() as c:
+                c.execute(
+                    f"UPDATE extra_ips SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
+                    (*sets.values(), extra_id),
+                )
+        return self.get_extra_ip(extra_id)  # type: ignore[return-value]
+
+    def delete_extra_ip(self, extra_id: int) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM extra_ips WHERE id = ?", (extra_id,))
 
     # ---------------- blocked ips ----------------
     def add_blocked_ip(self, ip: str, instance_id: int | None) -> None:

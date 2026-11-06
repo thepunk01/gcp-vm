@@ -78,9 +78,11 @@ def create_app(
     HUB.configure(
         db.get_settings,
         lambda: [
-            (i["external_ip"], int(i["check_port"]))
-            for i in db.list_instances()
-            if i["status"] == "RUNNING" and i["external_ip"]
+            (ip, int(i["check_port"]))
+            for i in _with_extras(db, db.list_instances())
+            if i["status"] == "RUNNING"
+            for ip in [i["external_ip"], *(x["ip"] for x in i["extra_ips"])]
+            if ip
         ],
     )
 
@@ -308,12 +310,32 @@ def create_app(
     # ---- instances ----
     @protected
     async def list_instances(_: Request):
-        return JSONResponse(db.list_instances())
+        return JSONResponse(_with_extras(db, db.list_instances()))
+
+    @protected
+    async def add_extra_ip(request: Request):
+        ex = await asyncio.to_thread(manager.add_extra_ip, int_param(request))
+        return JSONResponse(ex)
+
+    @protected
+    async def extra_ip_action(request: Request):
+        eid = int_param(request)
+        act = (await body(request)).get("action")
+        if act == "change":
+            return JSONResponse(await asyncio.to_thread(manager.change_extra_ip, eid))
+        if act == "check":
+            return JSONResponse(await asyncio.to_thread(manager.check_extra_ip, eid))
+        raise ValueError("未知操作")
+
+    @protected
+    async def delete_extra_ip(request: Request):
+        await asyncio.to_thread(manager.remove_extra_ip, int_param(request))
+        return JSONResponse({"ok": True})
 
     @protected
     async def sync(_: Request):
         result = await asyncio.to_thread(manager.sync_all)
-        return JSONResponse({"result": result, "instances": db.list_instances()})
+        return JSONResponse({"result": result, "instances": _with_extras(db, db.list_instances())})
 
     @protected
     async def update_instance(request: Request):
@@ -762,6 +784,9 @@ def create_app(
         Route("/api/instances/{id}", update_instance, methods=["PATCH"]),
         Route("/api/instances/{id}", delete_instance, methods=["DELETE"]),
         Route("/api/instances/{id}/action", instance_action, methods=["POST"]),
+        Route("/api/instances/{id}/extra-ips", add_extra_ip, methods=["POST"]),
+        Route("/api/extra-ips/{id}", extra_ip_action, methods=["POST"]),
+        Route("/api/extra-ips/{id}", delete_extra_ip, methods=["DELETE"]),
         Route("/api/instances/{id}/exec", exec_command, methods=["POST"]),
         Route("/api/instances/{id}/startup-script", get_startup),
         Route("/api/instances/{id}/startup-script", put_startup, methods=["PUT"]),
@@ -786,6 +811,13 @@ def create_app(
     app.state.db = db
     app.state.manager = manager
     return app
+
+
+def _with_extras(db: Database, insts: list[dict]) -> list[dict]:
+    by: dict[int, list] = {}
+    for x in db.list_extra_ips():
+        by.setdefault(x["instance_id"], []).append(x)
+    return [i | {"extra_ips": by.get(i["id"], [])} for i in insts]
 
 
 def _clean(inst: dict) -> dict:

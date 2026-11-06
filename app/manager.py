@@ -37,6 +37,8 @@ log = logging.getLogger(__name__)
 STOPPED_STATES = {"TERMINATED", "STOPPED", "SUSPENDED"}
 STATIC_PREFIX = "gcpvm-"
 HOLD_PREFIX = "gcpvm-hold-"
+EXTRA_PREFIX = "gcpvmx-"  # 附加 IP 的静态地址 / 转发规则 / 目标实例（与 gcpvm- 区分，不会被残留清理误删）
+MAX_EXTRA_IPS = 8
 MAX_EPHEMERAL_TRIES = 6
 # 占不住被墙 IP 时（如没有静态 IP 配额），释放后等待一段时间再申请，避免立刻被分回同一个 IP
 RELEASE_WAITS = (10, 20, 30, 45, 60, 60)
@@ -747,14 +749,198 @@ class Manager:
             except Exception as e:  # noqa: BLE001
                 log.exception("自动替补出错")
                 self._event(None, "replace", f"自动替补出错：{e}", "error")
+            extras = {}
+            for x in self.db.list_extra_ips():
+                extras.setdefault(x["instance_id"], []).append(x)
             for inst in self.db.list_instances():
                 try:
                     self.process_instance(inst, settings)
+                    if inst["id"] in extras:
+                        self.process_extras(inst["id"], settings)
                 except Exception as e:  # noqa: BLE001
                     log.exception("处理实例 %s 出错", inst["name"])
                     self._event(inst, "check", f"检测出错：{e}", "error")
         finally:
             self._cycle_lock.release()
+
+    # ---------------- 附加 IP（GCP 协议转发） ----------------
+    @staticmethod
+    def _ti_name(inst: dict) -> str:
+        return f"{EXTRA_PREFIX}ti-{inst['name']}"[:63].rstrip("-")
+
+    def _extra_ctx(self, extra_id: int) -> tuple[dict, dict]:
+        ex = self.db.get_extra_ip(extra_id)
+        if not ex:
+            raise ManagerError("附加 IP 不存在")
+        return ex, self._only_gcp(ex["instance_id"])
+
+    def _new_extra(self, client, inst: dict, region: str, avoid: set[str], verify) -> tuple[str, str, dict]:
+        """预留静态地址 + 建转发规则；被墙（已知或验证不通过）的先占住继续换，最后统一释放。返回 (ip, 资源名, 验证信息)。"""
+        tier = inst.get("network_tier") or "PREMIUM"
+        target = client.ensure_target_instance(inst["zone"], inst["name"], self._ti_name(inst))
+        base = f"{EXTRA_PREFIX}{inst['name']}"[:40].rstrip("-") + "-" + datetime.now().strftime("%m%d%H%M%S") + secrets.token_hex(2)
+        rejected: list[str] = []
+        try:
+            for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
+                name = f"{base}-{attempt}"
+                ip = client.reserve_address(region, name, tier)
+                if not ip or ip in avoid:
+                    rejected.append(name)
+                    continue
+                try:
+                    client.insert_forwarding_rule(region, name, ip, target, tier)
+                except GCPError:
+                    rejected.append(name)
+                    raise
+                if verify is None:
+                    return ip, name, {}
+                ok, detail = verify(ip)
+                if ok:
+                    return ip, name, {}
+                avoid.add(ip)
+                self._reject_candidate(inst, ip, detail, attempt)
+                client.delete_forwarding_rule(region, name)
+                rejected.append(name)
+            raise GCPError(f"连续 {MAX_EPHEMERAL_TRIES} 个新 IP 都是被墙的，本次放弃")
+        finally:
+            for name in rejected:
+                try:
+                    client.release_address(region, name)
+                except GCPError as e:
+                    self._event(inst, "change_ip", f"释放被拒绝的地址 {name} 失败：{e}", "warn")
+
+    def _drop_extra_resources(self, client, inst: dict, ex: dict) -> None:
+        client.delete_forwarding_rule(ex["region"], ex["res_name"])
+        try:
+            client.release_address(ex["region"], ex["res_name"])
+        except GCPError as e:
+            if "HTTP 404" not in str(e):
+                raise
+
+    def add_extra_ip(self, instance_id: int) -> dict:
+        inst = self._only_gcp(instance_id)
+        if len(self.db.list_extra_ips(instance_id)) >= MAX_EXTRA_IPS:
+            raise ManagerError(f"每台实例最多 {MAX_EXTRA_IPS} 个附加 IP")
+        lock = self._lock_for(instance_id)
+        if not lock.acquire(blocking=False):
+            raise ManagerError("该实例正在处理其他操作，请稍后再试")
+        try:
+            client = self._client(inst["account_id"])
+            region = region_of(inst["zone"])
+            avoid = self.db.recent_blocked_ips() | {inst["external_ip"]} | {x["ip"] for x in self.db.list_extra_ips(instance_id)}
+            verify, vinfo = self._make_verifier(inst) if inst["status"] == "RUNNING" else (None, {"verified": False})
+            try:
+                ip, name, _ = self._new_extra(client, inst, region, avoid, verify)
+            except GCPError as e:
+                msg = str(e)
+                if "QUOTA" in msg.upper() or "Quota" in msg:
+                    msg = f"该区域的外部 IP 配额不足（IN_USE_ADDRESSES / STATIC_ADDRESSES），请在 GCP 配额页申请提高。原始错误：{msg}"
+                self._event(inst, "change_ip", f"添加附加 IP 失败：{msg}", "error")
+                raise ManagerError(msg) from e
+            state = STATE_OK if vinfo.get("verified") else STATE_UNKNOWN
+            ex = self.db.add_extra_ip(instance_id, ip, region, name, state)
+            self._event(inst, "change_ip", f"已添加附加 IP {ip}（所有端口转发到本机）", notify=True)
+            return ex
+        finally:
+            lock.release()
+
+    def change_extra_ip(self, extra_id: int, reason: str = "手动") -> dict:
+        ex, inst = self._extra_ctx(extra_id)
+        lock = self._lock_for(inst["id"])
+        if not lock.acquire(blocking=False):
+            raise ManagerError("该实例正在处理其他操作，请稍后再试")
+        try:
+            client = self._client(inst["account_id"])
+            old = ex["ip"]
+            if old and reason != "手动":
+                self.db.add_blocked_ip(old, inst["id"])
+            avoid = self.db.recent_blocked_ips() | {old, inst["external_ip"]} | {x["ip"] for x in self.db.list_extra_ips(inst["id"])}
+            verify, vinfo = self._make_verifier(inst) if inst["status"] == "RUNNING" else (None, {"verified": False})
+            try:
+                ip, name, _ = self._new_extra(client, inst, ex["region"], avoid, verify)
+            except GCPError as e:
+                self._event(inst, "change_ip", f"附加 IP {old} 更换失败（{reason}）：{e}", "error", notify=True)
+                raise ManagerError(str(e)) from e
+            try:
+                self._drop_extra_resources(client, inst, ex)
+            except GCPError as e:
+                self._event(inst, "change_ip", f"删除旧附加 IP {old} 的转发规则/地址失败：{e}", "warn")
+            ex = self.db.update_extra_ip(
+                extra_id, ip=ip, res_name=name, fail_count=0, last_change_at=time.time(),
+                cn_state=STATE_OK if vinfo.get("verified") else STATE_UNKNOWN,
+            )
+            self._event(inst, "change_ip", f"IP 已更换（{reason}·附加 IP）：{old} -> {ip}", "warn", notify=True)
+            return ex
+        finally:
+            lock.release()
+
+    def remove_extra_ip(self, extra_id: int) -> None:
+        ex = self.db.get_extra_ip(extra_id)
+        if not ex:
+            raise ManagerError("附加 IP 不存在")
+        inst = self._instance(ex["instance_id"])
+        if inst.get("status") != "LOST" and inst.get("account_status") != "banned":
+            client = self._client(inst["account_id"])
+            try:
+                self._drop_extra_resources(client, inst, ex)
+                if len(self.db.list_extra_ips(inst["id"])) <= 1:
+                    client.delete_target_instance(inst["zone"], self._ti_name(inst))
+            except GCPError as e:
+                raise ManagerError(f"删除附加 IP 失败：{e}") from e
+        self.db.delete_extra_ip(extra_id)
+        self._event(inst, "change_ip", f"已删除附加 IP {ex['ip']}", "warn")
+
+    def _remove_all_extras(self, client, inst: dict) -> None:
+        extras = self.db.list_extra_ips(inst["id"])
+        for ex in extras:
+            try:
+                self._drop_extra_resources(client, inst, ex)
+            except GCPError as e:
+                log.warning("清理附加 IP %s 失败：%s", ex["ip"], e)
+            self.db.delete_extra_ip(ex["id"])
+        if extras:
+            try:
+                client.delete_target_instance(inst["zone"], self._ti_name(inst))
+            except GCPError as e:
+                log.warning("删除目标实例失败：%s", e)
+
+    def check_extra_ip(self, extra_id: int) -> dict:
+        ex, inst = self._extra_ctx(extra_id)
+        res = self.checker_cls(self.db.get_settings()).check(ex["ip"], inst["check_port"])
+        self.db.update_extra_ip(extra_id, cn_state=res.state, last_check=time.time())
+        return res.to_dict()
+
+    def process_extras(self, instance_id: int, settings: dict) -> None:
+        """附加 IP 的被墙检测与自动更换（跟随实例的「被墙自动换 IP」开关；冷却按每个 IP 单独计算）。"""
+        inst = self.db.get_instance(instance_id)
+        if not inst or not inst["auto_ip"] or inst["status"] != "RUNNING":
+            return
+        inst = self._instance(instance_id)
+        if inst.get("account_status") == "banned":
+            return
+        threshold = int(settings["fail_threshold"])
+        for ex in self.db.list_extra_ips(instance_id):
+            res = self.checker_cls(settings).check(ex["ip"], inst["check_port"])
+            now = time.time()
+            if res.state != STATE_BLOCKED:
+                if res.state == STATE_OK and ex["cn_state"] == STATE_BLOCKED:
+                    self._event(inst, "check", f"附加 IP {ex['ip']} 国内恢复可达")
+                self.db.update_extra_ip(ex["id"], cn_state=res.state, fail_count=0 if res.state == STATE_OK else ex["fail_count"], last_check=now)
+                continue
+            fails = ex["fail_count"] + 1
+            self.db.update_extra_ip(ex["id"], cn_state=STATE_BLOCKED, fail_count=fails, last_check=now)
+            self._event(inst, "check", f"附加 IP {ex['ip']}:{inst['check_port']} {res.detail}（{fails}/{threshold}）", "warn")
+            if fails < threshold:
+                continue
+            why = self._can_auto_change(inst | {"last_change_at": ex["last_change_at"]}, settings)
+            if why:
+                self._event(inst, "check", f"附加 IP {ex['ip']} 暂不自动更换：{why}", "warn")
+                continue
+            self.db.add_event("change_ip_auto", f"自动换附加 IP {ex['ip']}", inst["id"])
+            try:
+                self.change_extra_ip(ex["id"], reason="自动-被墙")
+            except ManagerError:
+                pass
 
     # ---------------- 自动替补（仅 GCP） ----------------
     ACCOUNT_FAIL_LIMIT = 2  # 连续几轮检测都确认账号不可用，才判定为被封
@@ -996,16 +1182,32 @@ class Manager:
                 self._event(old, "replace", f"替补失败（{reason}）：所有可用账号都创建失败。{'；'.join(errors)[:600]}", "error", notify=True)
             return
         self._replace_warned.discard(old["id"])
+        # 原实例有附加 IP 的，新实例补上同样数量
+        n_extra = len(self.db.list_extra_ips(old["id"]))
+        added = []
+        for _ in range(n_extra):
+            try:
+                added.append(self.add_extra_ip(new["id"])["ip"])
+            except ManagerError as e:
+                self._event(new, "replace", f"为替补实例添加附加 IP 失败：{e}", "warn")
+                break
         msg = (f"自动替补：{old['name']}（{old['account_name']}，{reason}，旧 IP {old['external_ip'] or '-'}）"
-               f" → {new['name']}（{new['account_name']}，IP {new['external_ip'] or '-'}）")
+               f" → {new['name']}（{new['account_name']}，IP {new['external_ip'] or '-'}"
+               f"{'，附加 IP ' + '、'.join(added) if added else ''}）")
         self.db.add_event("replace_new", msg, new["id"], "warn")
         send_telegram(self.db.get_settings(), f"GCP-VM {msg}")
         log.warning(msg)
         if reason in ("实例被挂起", "停机且无法开机"):
             try:
+                self._remove_all_extras(self._client(old["account_id"]), old)
                 self._client(old["account_id"]).delete_instance(old["zone"], old["name"])
             except GCPError as e:
                 self._event(old, "replace", f"删除被挂起的旧实例失败：{e}", "warn")
+        elif reason == "实例被删除" and self.db.list_extra_ips(old["id"]):
+            try:  # 实例没了，但旧账号里的附加 IP 转发规则 / 地址还在计费，顺手清掉
+                self._remove_all_extras(self._client(old["account_id"]), old)
+            except GCPError as e:
+                self._event(old, "replace", f"清理旧实例的附加 IP 失败：{e}", "warn")
         self._suspended_seen.pop(old["id"], None)
         self._stopped_since.pop(old["id"], None)
         self.db.delete_instance(old["id"])
@@ -1408,6 +1610,7 @@ class Manager:
                 return
             client = self._client(inst["account_id"])
             region = region_of(inst["zone"])
+            self._remove_all_extras(client, inst)
             addr = None
             try:
                 ip = client.get_instance(inst["zone"], inst["name"])["external_ip"]

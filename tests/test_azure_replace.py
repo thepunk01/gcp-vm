@@ -524,3 +524,32 @@ def test_replace_recreates_extra_ips(renv):
     assert len(db.list_extra_ips(new["id"])) == 2 and len(b.rules) == 2
     assert a.rules == {} and a.targets == {}  # 旧账号里的附加 IP 已清理
     assert any("附加 IP" in e["message"] and e["type"] == "replace_new" for e in db.list_events())
+
+
+def test_change_ip_billing_disabled_bans_account_then_replaces(renv):
+    mgr, db, (a, b, c), accs = renv
+    inst = db.list_instances()[0]
+
+    def no_billing(*args, **kw):
+        raise GCPError("POST addAccessConfig 失败：HTTP 403 This API method requires billing to be enabled.")
+    a.add_access_config = no_billing
+    db.update_instance_config(inst["id"], {"ip_mode": "ephemeral"})
+    with pytest.raises(ManagerError):
+        mgr.change_ip(inst["id"], reason="自动-被墙")
+    assert db.get_account(accs[0]["id"])["status"] == "banned"
+    assert any("已判定为停用" in e["message"] for e in db.list_events())
+    mgr.replace_cycle()
+    rows = db.list_instances()
+    assert len(rows) == 1 and rows[0]["account_id"] == accs[1]["id"]
+
+
+def test_single_403_does_not_ban(renv):
+    mgr, db, (a, b, c), accs = renv
+    inst = db.list_instances()[0]
+
+    def denied(*args, **kw):
+        raise GCPError("POST start 失败：HTTP 403 Required 'compute.instances.start' permission")
+    a.start = denied
+    with pytest.raises(ManagerError):
+        mgr.power(inst["id"], "start")
+    assert db.get_account(accs[0]["id"])["status"] == "ok"

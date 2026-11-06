@@ -179,9 +179,28 @@ class Manager:
             return inst
         except GCPError as e:
             self._event(inst, action, f"{source}{label}失败：{e}", "error", notify=True)
+            self._note_account_error(inst, e)
             raise ManagerError(str(e)) from e
         finally:
             lock.release()
+
+    def _note_account_error(self, inst: dict, e: Exception) -> None:
+        """操作失败且是账号级错误：结算停用 / 项目暂停立即判定账号停用，其他（如 401/403）累计到上限再判定。
+        判定后自动替补会接手该账号下勾选了替补的实例。"""
+        if inst.get("provider") != "gcp" or not self._is_account_fatal(e):
+            return
+        acc = self.db.get_account(inst["account_id"], with_key=False)
+        if not acc or acc.get("status") == "banned":
+            return
+        low = str(e).lower()
+        n = self.ACCOUNT_FAIL_LIMIT if ("billing" in low or "suspend" in low) else self._acct_fails.get(acc["id"], 0) + 1
+        self._acct_fails[acc["id"]] = n
+        if n < self.ACCOUNT_FAIL_LIMIT:
+            return
+        self.db.set_account_status(acc["id"], "banned", str(e))
+        follow = "，勾选了自动替补的实例将在下一轮检测时替补" if self.db.get_settings().get("replace_enabled") else ""
+        self._event(inst, "replace", f"账号 {acc['name']} 无法操作（结算停用 / 被暂停 / 无权限），已判定为停用{follow}。原因：{str(e)[:200]}",
+                    "error", notify=True)
 
     # ---------------- change ip ----------------
     def change_ip(self, instance_id: int, reason: str = "手动") -> dict:
@@ -193,6 +212,9 @@ class Manager:
             if inst.get("provider") == "azure":
                 return self._change_ip_azure(inst, reason)
             return self._change_ip_locked(inst, reason)
+        except ManagerError as e:
+            self._note_account_error(inst, e)
+            raise
         finally:
             lock.release()
 

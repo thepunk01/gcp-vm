@@ -171,7 +171,7 @@ class Reporter:
             out.append("")
         t = peaks.get(TOTAL, {"rx": 0, "tx": 0})
         c = counts.get(TOTAL, zero)
-        if show_peak or show_ip:
+        if settings.get("report_total", False) and (show_peak or show_ip):
             out.append("━━━━━━━━━━━━━━")
             out.append("<b>合计</b>")
             if show_peak:

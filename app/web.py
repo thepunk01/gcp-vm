@@ -622,7 +622,7 @@ def create_app(
         if "report_times" in data:
             from .report import parse_times
             data["report_times"] = ",".join(parse_times(data["report_times"]))
-        for k in ("report_enabled", "report_peaks", "report_ip_changes"):
+        for k in ("report_enabled", "report_peaks", "report_ip_changes", "report_total"):
             if k in data:
                 data[k] = bool(data[k])
         if "report_chat_id" in data:

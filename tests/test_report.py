@@ -17,7 +17,7 @@ def rep(db):
     insts = db.list_instances()
     db.update_instance_config(insts[0]["id"], {"grp": "台湾入口"})
     db.update_settings({"report_enabled": True, "report_times": "09:00", "telegram_bot_token": "t", "telegram_chat_id": "1",
-                        "report_chat_id": "-100777"})
+                        "report_chat_id": "-100777", "report_total": True})
     hub = TrafficHub()
     sent = []
     r = Reporter(db, hub, sender=lambda s, text, html=False: sent.append((s["telegram_chat_id"], text)) or True)
@@ -87,3 +87,9 @@ def test_live_rate_floor_and_html_escape(rep):
     text = r.build(db.get_settings(), now)  # 没有采样过，也应取实时速率
     assert "<code>11.1 Mbps</code>" in text
     assert "A&lt;b&gt;" in text and "<i>仅限协议：AnyTLS</i>" in text
+
+
+def test_total_hidden_by_default(rep):
+    r, hub, db, insts, sent = rep
+    db.update_settings({"report_total": False})
+    assert "合计" not in r.build(db.get_settings())

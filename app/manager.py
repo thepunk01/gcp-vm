@@ -74,6 +74,7 @@ class Manager:
         self._acct_fails: dict[int, int] = {}
         self._suspended_seen: dict[int, int] = {}
         self._stopped_since: dict[int, float] = {}
+        self._unreachable: set[int] = set()  # 已判定停用、且连查询都失败的账号
         self._replace_warned: set[int] = set()
         self._replace_lock = threading.Lock()
 
@@ -197,8 +198,9 @@ class Manager:
         if n < self.ACCOUNT_FAIL_LIMIT:
             return
         self.db.set_account_status(acc["id"], "banned", str(e))
-        follow = "，勾选了自动替补的实例将在下一轮检测时替补" if self.db.get_settings().get("replace_enabled") else ""
-        self._event(inst, "replace", f"账号 {acc['name']} 无法操作（结算停用 / 被暂停 / 无权限），已判定为停用{follow}。原因：{str(e)[:200]}",
+        follow = ("。仍在正常运行的实例会保留；停机、没有外网 IP、被墙的勾选了自动替补的实例会被替补"
+                  if self.db.get_settings().get("replace_enabled") else "")
+        self._event(inst, "replace", f"账号 {acc['name']} 无法操作（结算停用 / 被暂停 / 无权限），已判定为停用（换 IP、新建等不可用）{follow}。原因：{str(e)[:200]}",
                     "error", notify=True)
 
     # ---------------- change ip ----------------
@@ -520,6 +522,15 @@ class Manager:
         self.db.update_instance(instance_id, cn_state=result.state, last_check=time.time())
         return result.to_dict()
 
+    def _check_only(self, inst: dict, settings: dict) -> None:
+        if inst["status"] != "RUNNING" or not inst["external_ip"] or not inst.get("auto_replace"):
+            return
+        res = self.checker_cls(settings).check(inst["external_ip"], inst["check_port"])
+        if res.state == STATE_BLOCKED:
+            self.db.update_instance(inst["id"], cn_state=STATE_BLOCKED, fail_count=inst["fail_count"] + 1, last_check=time.time())
+        else:
+            self.db.update_instance(inst["id"], cn_state=res.state, fail_count=0 if res.state == STATE_OK else inst["fail_count"], last_check=time.time())
+
     def _can_auto_change(self, inst: dict, settings: dict) -> str | None:
         """返回不能自动换 IP 的原因，可以则返回 None。"""
         cooldown = float(settings["cooldown_minutes"]) * 60
@@ -535,7 +546,10 @@ class Manager:
         if inst.get("provider") == "manual":
             self._process_manual(inst, settings)
             return
-        if inst["status"] == "LOST" or inst.get("account_status") == "banned":
+        if inst["status"] == "LOST":
+            return
+        if inst.get("account_status") == "banned":
+            self._check_only(inst, settings)  # 停用账号没法换 IP，只更新检测状态，供替补判断
             return
         if not (inst["auto_ip"] or inst["auto_start"]):
             return
@@ -1121,9 +1135,15 @@ class Manager:
         if not settings.get("replace_enabled"):
             return
         with self._replace_lock:
-            # 1) 逐个账号同步：发现账号被封、实例被删除
+            # 1) 逐个账号同步：发现账号被封、实例被删除。已判定停用的账号也尽量同步（只读），
+            #    结算受限时往往还能查询，正在正常运行的实例就不必替补
             for acc in self._gcp_accounts():
                 if acc["status"] == "banned":
+                    try:
+                        self.sync_account(acc["id"])
+                        self._unreachable.discard(acc["id"])
+                    except Exception:  # noqa: BLE001
+                        self._unreachable.add(acc["id"])
                     continue
                 try:
                     self.sync_account(acc["id"])
@@ -1138,6 +1158,7 @@ class Manager:
                         self._event(None, "replace", f"[{acc['name']}] 账号访问失败（{n}/{self.ACCOUNT_FAIL_LIMIT}）：{str(e)[:300]}", "warn")
                         continue
                     self.db.set_account_status(acc["id"], "banned", str(e))
+                    self._unreachable.add(acc["id"])
                     self._event(None, "replace", f"账号 {acc['name']} 判定为被封/停用：{str(e)[:300]}", "error", notify=True)
                 except Exception as e:  # noqa: BLE001
                     log.warning("同步账号 %s 出错：%s", acc["name"], e)
@@ -1158,7 +1179,9 @@ class Manager:
                 if any(t[0]["id"] == inst["id"] for t in todo):
                     continue
                 if inst["account_status"] == "banned":
-                    todo.append((inst, "账号被封"))
+                    why = self._banned_reason(inst, settings)
+                    if why:
+                        todo.append((inst, why))
                 elif inst["status"] == "LOST":
                     todo.append((inst, "实例被删除"))
             # 4) 逐个替补
@@ -1171,6 +1194,19 @@ class Manager:
                     return
                 self._replace_warned.discard(-1)
                 self._replace_one(old, reason, settings)
+
+    def _banned_reason(self, inst: dict, settings: dict) -> str:
+        """停用账号里的实例是否需要替补：账号无法访问，或实例已停止 / 没有外网 IP / 被墙（停用账号没法换 IP）。
+        仍在正常运行的保留，返回空字符串。"""
+        if inst["account_id"] in self._unreachable or inst["status"] == "LOST":
+            return "账号被封"
+        if inst["status"] != "RUNNING":
+            return "账号停用且实例已停止"
+        if not inst["external_ip"]:
+            return "账号停用且实例没有外网 IP"
+        if inst["cn_state"] == STATE_BLOCKED and inst["fail_count"] >= int(settings["fail_threshold"]):
+            return "账号停用且实例被墙"
+        return ""
 
     def _handle_stopped(self, settings: dict) -> list[dict]:
         """返回「停机且开不了、账号本身正常」需要替补的实例。账号级错误会把账号标记为停用（随后整号替补）。"""
@@ -1228,7 +1264,7 @@ class Manager:
         self.db.add_event("replace_new", msg, new["id"], "warn")
         send_telegram(self.db.get_settings(), f"GCP-VM {msg}")
         log.warning(msg)
-        if reason in ("实例被挂起", "停机且无法开机"):
+        if reason in ("实例被挂起", "停机且无法开机") or reason.startswith("账号停用且"):
             try:
                 self._remove_all_extras(self._client(old["account_id"]), old)
                 self._client(old["account_id"]).delete_instance(old["zone"], old["name"])
@@ -1249,6 +1285,7 @@ class Manager:
             raise ManagerError("账号不存在")
         self.db.set_account_status(account_id, "ok", "")
         self._acct_fails.pop(account_id, None)
+        self._unreachable.discard(account_id)
         self._event(None, "account", f"账号 {acc['name']} 已解除「被封」标记")
 
     # ---------------- remote exec (SSH) ----------------

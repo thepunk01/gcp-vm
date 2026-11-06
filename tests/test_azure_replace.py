@@ -574,3 +574,22 @@ def test_missing_ip_is_restored_when_billing_recovers(renv):
     mgr.process_instance(db.get_instance(inst["id"]), db.get_settings())
     assert db.get_instance(inst["id"])["external_ip"]
     assert db.get_account(accs[0]["id"])["status"] == "ok"
+
+
+def test_restricted_account_keeps_healthy_instances(renv):
+    mgr, db, (a, b, c), accs = renv
+    inst = db.list_instances()[0]
+    db.set_account_status(accs[0]["id"], "banned", "billing")  # 账号受限，但还能查询
+    mgr.replace_cycle()
+    rows = db.list_instances()
+    assert [r["id"] for r in rows] == [inst["id"]] and not b.instances  # 正常运行的不替补
+    # 被墙达到阈值后（停用账号没法换 IP）才替补
+    SeqBlocked = make_checker(["blocked"])
+    mgr.checker_cls = SeqBlocked
+    s = db.get_settings()
+    for _ in range(int(s["fail_threshold"])):
+        mgr.process_instance(db.get_instance(inst["id"]) | {"account_status": "banned", "provider": "gcp"}, s)
+    mgr.replace_cycle()
+    rows = db.list_instances()
+    assert len(rows) == 1 and rows[0]["account_id"] == accs[1]["id"]
+    assert ("delete", "vm1") in a.calls  # 尝试删除旧实例

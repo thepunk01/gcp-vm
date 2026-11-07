@@ -676,7 +676,7 @@ async function pollJob() {
     if (execJob !== job) return;
     const out = $("#exec-output");
     const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 30;
-    if (r.output) out.textContent += r.output;
+    if (r.output) out.textContent += r.output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");  // 去掉终端颜色码
     if (atBottom) out.scrollTop = out.scrollHeight;
     job.offset = r.offset;
     if (r.status === "running") { execTimer = setTimeout(pollJob, 1000); return; }

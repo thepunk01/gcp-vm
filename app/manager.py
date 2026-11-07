@@ -878,7 +878,11 @@ class Manager:
                 ip, name, _ = self._new_extra(client, inst, region, avoid, verify)
             except GCPError as e:
                 msg = str(e)
-                if "QUOTA" in msg.upper() or "Quota" in msg:
+                if "restrictProtocolForwardingCreationForTypes" in msg:
+                    msg = ("该项目的组织政策禁止创建外部协议转发（constraints/compute.restrictProtocolForwardingCreationForTypes）。"
+                           "请在 GCP 控制台「IAM 和管理 → 组织政策」把「Restrict Protocol Forwarding Based on type of IP Address」"
+                           "改为允许全部（需要组织政策管理员权限），再重试。")
+                elif "QUOTA" in msg.upper() or "Quota" in msg:
                     msg = f"该区域的外部 IP 配额不足（IN_USE_ADDRESSES / STATIC_ADDRESSES），请在 GCP 配额页申请提高。原始错误：{msg}"
                 self._event(inst, "change_ip", f"添加附加 IP 失败：{msg}", "error")
                 raise ManagerError(msg) from e

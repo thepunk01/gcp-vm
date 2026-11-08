@@ -822,13 +822,26 @@ class Manager:
     def _new_extra(self, client, inst: dict, region: str, avoid: set[str], verify) -> tuple[str, str, dict]:
         """预留静态地址 + 建转发规则；被墙（已知或验证不通过）的先占住继续换，最后统一释放。返回 (ip, 资源名, 验证信息)。"""
         tier = inst.get("network_tier") or "PREMIUM"
+        self._cleanup_extra_leftovers(client, inst, region)
         target = client.ensure_target_instance(inst["zone"], inst["name"], self._ti_name(inst))
         base = f"{EXTRA_PREFIX}{inst['name']}"[:40].rstrip("-") + "-" + datetime.now().strftime("%m%d%H%M%S") + secrets.token_hex(2)
         rejected: list[str] = []
+
+        def reserve(name: str) -> str:
+            try:
+                return client.reserve_address(region, name, tier)
+            except GCPError as e:
+                if not self._is_quota(e) or not rejected:
+                    raise
+            # 静态地址配额不够：先释放占住的被墙候选（它们已在规避列表里，再分到会被跳过），再试一次
+            self._release_names(client, inst, region, rejected)
+            rejected.clear()
+            return client.reserve_address(region, name, tier)
+
         try:
             for attempt in range(1, MAX_EPHEMERAL_TRIES + 1):
                 name = f"{base}-{attempt}"
-                ip = client.reserve_address(region, name, tier)
+                ip = reserve(name)
                 if not ip or ip in avoid:
                     rejected.append(name)
                     continue
@@ -848,13 +861,48 @@ class Manager:
                 rejected.append(name)
             raise GCPError(f"连续 {MAX_EPHEMERAL_TRIES} 个新 IP 都是被墙的，本次放弃")
         finally:
-            for name in rejected:
+            self._release_names(client, inst, region, rejected)
+
+    @staticmethod
+    def _is_quota(e: Exception) -> bool:
+        return "quota" in str(e).lower()
+
+    def _release_names(self, client, inst: dict, region: str, names: list[str]) -> None:
+        for name in names:
+            try:
+                client.release_address(region, name)
+            except GCPError as e:
+                self._event(inst, "change_ip", f"释放被拒绝的地址 {name} 失败：{e}", "warn")
+
+    def _cleanup_extra_leftovers(self, client, inst: dict, region: str) -> None:
+        """释放附加 IP 残留的静态地址（未绑定转发规则、面板也没在用、创建超过 30 分钟），避免占满配额。"""
+        known = {x["res_name"] for x in self.db.list_extra_ips()}
+        now = datetime.now()
+        try:
+            addrs = client.list_addresses(region)
+        except GCPError as e:
+            log.warning("查询静态地址失败：%s", e)
+            return
+        for a in addrs:
+            if not a["name"].startswith(EXTRA_PREFIX) or a["status"] != "RESERVED" or a["name"] in known:
+                continue
+            m = re.search(r"-(\d{10})[0-9a-f]{4}-\d+$", a["name"])
+            if m:
                 try:
-                    client.release_address(region, name)
-                except GCPError as e:
-                    self._event(inst, "change_ip", f"释放被拒绝的地址 {name} 失败：{e}", "warn")
+                    made = datetime.strptime(f"{now.year}{m.group(1)}", "%Y%m%d%H%M%S")
+                    if 0 <= (now - made).total_seconds() < 1800:
+                        continue  # 可能是正在进行中的操作
+                except ValueError:
+                    pass
+            try:
+                client.release_address(region, a["name"])
+                self._event(inst, "change_ip", f"已释放残留的附加 IP 地址 {a['name']}（{a['address'] or '-'}）")
+            except GCPError as e:
+                log.warning("释放残留地址 %s 失败：%s", a["name"], e)
 
     def _drop_extra_resources(self, client, inst: dict, ex: dict) -> None:
+        if not ex.get("res_name"):
+            return
         client.delete_forwarding_rule(ex["region"], ex["res_name"])
         try:
             client.release_address(ex["region"], ex["res_name"])
@@ -905,15 +953,29 @@ class Manager:
                 self.db.add_blocked_ip(old, inst["id"])
             avoid = self.db.recent_blocked_ips() | {old, inst["external_ip"]} | {x["ip"] for x in self.db.list_extra_ips(inst["id"])}
             verify, vinfo = self._make_verifier(inst) if inst["status"] == "RUNNING" else (None, {"verified": False})
+            dropped = False
             try:
-                ip, name, _ = self._new_extra(client, inst, ex["region"], avoid, verify)
+                try:
+                    ip, name, _ = self._new_extra(client, inst, ex["region"], avoid, verify)
+                except GCPError as e:
+                    if not self._is_quota(e) or not ex.get("res_name"):
+                        raise
+                    self._event(inst, "change_ip", f"静态地址配额已满，先释放旧附加 IP {old} 再分配新的", "warn")
+                    self._drop_extra_resources(client, inst, ex)
+                    dropped = True
+                    self.db.update_extra_ip(extra_id, ip="", res_name="", cn_state=STATE_UNKNOWN)
+                    ip, name, _ = self._new_extra(client, inst, ex["region"], avoid, verify)
             except GCPError as e:
-                self._event(inst, "change_ip", f"附加 IP {old} 更换失败（{reason}）：{e}", "error", notify=True)
-                raise ManagerError(str(e)) from e
-            try:
-                self._drop_extra_resources(client, inst, ex)
-            except GCPError as e:
-                self._event(inst, "change_ip", f"删除旧附加 IP {old} 的转发规则/地址失败：{e}", "warn")
+                msg = str(e)
+                if self._is_quota(e):
+                    msg = f"该区域静态 IP 配额已满（STATIC_ADDRESSES），请到 GCP「IAM 和管理 → 配额」申请提高，或删掉不用的 IP。原始错误：{msg}"
+                self._event(inst, "change_ip", f"附加 IP {old or '(空)'} 更换失败（{reason}）：{msg}", "error", notify=True)
+                raise ManagerError(msg) from e
+            if not dropped:
+                try:
+                    self._drop_extra_resources(client, inst, ex)
+                except GCPError as e:
+                    self._event(inst, "change_ip", f"删除旧附加 IP {old} 的转发规则/地址失败：{e}", "warn")
             ex = self.db.update_extra_ip(
                 extra_id, ip=ip, res_name=name, fail_count=0, last_change_at=time.time(),
                 cn_state=STATE_OK if vinfo.get("verified") else STATE_UNKNOWN,
@@ -969,6 +1031,12 @@ class Manager:
             return
         threshold = int(settings["fail_threshold"])
         for ex in self.db.list_extra_ips(instance_id):
+            if not ex["ip"]:
+                try:
+                    self.change_extra_ip(ex["id"], reason="重新分配")
+                except ManagerError:
+                    pass
+                continue
             res = self.checker_cls(settings).check(ex["ip"], inst["check_port"])
             now = time.time()
             if res.state != STATE_BLOCKED:

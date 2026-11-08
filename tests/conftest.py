@@ -197,6 +197,8 @@ class FakeGCP:
         return None
 
     def reserve_address(self, region, name, network_tier=None, address=None):
+        if getattr(self, "static_quota", None) is not None and len(self.addresses) >= self.static_quota:
+            raise GCPError(f"POST addresses 失败：HTTP 403 Quota 'STATIC_ADDRESSES' exceeded. Limit: {self.static_quota}.0 in region {region}.")
         if address:
             ip = address
         elif self.released:
@@ -208,7 +210,7 @@ class FakeGCP:
         return ip
 
     def list_addresses(self, region):
-        in_use = {i["ip"] for i in self.instances.values()}
+        in_use = {i["ip"] for i in self.instances.values()} | {r["ip"] for r in getattr(self, "rules", {}).values()}
         return [
             {"name": n, "address": a["address"], "status": "IN_USE" if a["address"] in in_use else "RESERVED"}
             for n, a in self.addresses.items()

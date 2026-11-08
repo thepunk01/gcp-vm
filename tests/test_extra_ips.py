@@ -88,3 +88,47 @@ def test_limit_and_hub_targets(xenv):
             mgr.add_extra_ip(inst["id"])
     finally:
         m.MAX_EXTRA_IPS = old
+
+
+def test_change_under_quota_releases_old_first(xenv):
+    mgr, db, fake, inst = xenv
+    ex = mgr.add_extra_ip(inst["id"])
+    fake.static_quota = len(fake.addresses)  # 配额用满：拿不到新地址，只能先释放旧的
+    with pytest.raises(ManagerError) as ei:
+        mgr.change_extra_ip(ex["id"], reason="自动-被墙")
+    assert "配额" in str(ei.value) or "被墙" in str(ei.value)
+    fake.static_quota = len(fake.addresses) + 2  # 再空出位置：释放旧的后，被分回的旧 IP 占住 1 个，新 IP 用 1 个
+    ex = db.get_extra_ip(ex["id"])
+    new = mgr.change_extra_ip(ex["id"], reason="自动-被墙")
+    assert new["ip"] and new["ip"] != "35.1.0.1"
+    assert any("配额已满，先释放旧附加 IP" in e["message"] for e in db.list_events())
+
+
+def test_quota_releases_held_rejects(xenv):
+    mgr, db, fake, inst = xenv
+    ex = mgr.add_extra_ip(inst["id"])             # 35.1.0.1
+    db.add_blocked_ip("35.1.0.2", None)           # 下一个候选被墙，会被占住
+    fake.static_quota = len(fake.addresses) + 2   # 旧的 + 1 个占住 + 1 个新的 = 刚好
+    new = mgr.change_extra_ip(ex["id"])
+    assert new["ip"] == "35.1.0.3"
+
+
+def test_cleanup_extra_leftovers(xenv):
+    mgr, db, fake, inst = xenv
+    fake.addresses["gcpvmx-old-01010101010abc-1"] = {"address": "9.9.9.9", "region": "asia-east1"}
+    mgr.add_extra_ip(inst["id"])
+    assert "gcpvmx-old-01010101010abc-1" not in fake.addresses
+
+
+def test_extra_without_ip_is_reallocated(xenv):
+    mgr, db, fake, inst = xenv
+    ex = mgr.add_extra_ip(inst["id"])
+    fake.static_quota = 0
+    try:
+        mgr.change_extra_ip(ex["id"], reason="自动-被墙")
+    except ManagerError:
+        pass
+    assert db.get_extra_ip(ex["id"])["ip"] == ""
+    fake.static_quota = None
+    mgr.process_extras(inst["id"], db.get_settings())
+    assert db.get_extra_ip(ex["id"])["ip"]

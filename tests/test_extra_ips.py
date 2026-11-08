@@ -132,3 +132,25 @@ def test_extra_without_ip_is_reallocated(xenv):
     fake.static_quota = None
     mgr.process_extras(inst["id"], db.get_settings())
     assert db.get_extra_ip(ex["id"])["ip"]
+
+
+def test_auto_change_failure_backoff(db):
+    fake = FakeGCP()
+    db.add_account("a", FAKE_KEY)
+    db.update_settings({"verify_new_ip": False, "fail_threshold": 1, "cooldown_minutes": 0, "max_changes_per_day": 50})
+    SeqChecker.states = {"34.0.0.1": "blocked"}
+    mgr = Manager(db, FakePool(fake), checker_cls=SeqChecker)
+    mgr._sleep = lambda s: None
+    mgr.sync_all()
+    inst = db.list_instances()[0]
+    db.update_instance_config(inst["id"], {"auto_ip": True})
+
+    def boom(*a, **k):
+        raise ManagerError("连续 6 次都分配到已知被墙的 IP")
+    mgr.change_ip = boom
+    s = db.get_settings()
+    mgr.process_instance(db.list_instances()[0], s)
+    assert mgr._auto_fail[inst["id"]][0] == 1
+    mgr.process_instance(db.list_instances()[0], s)  # 退避期内不再尝试
+    assert mgr._auto_fail[inst["id"]][0] == 1
+    assert any("分钟后再试" in e["message"] for e in db.list_events())

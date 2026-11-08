@@ -74,6 +74,7 @@ class Manager:
         self._acct_fails: dict[int, int] = {}
         self._suspended_seen: dict[int, int] = {}
         self._stopped_since: dict[int, float] = {}
+        self._auto_fail: dict[int, tuple[int, float]] = {}  # 实例 -> (连续失败次数, 下次允许时间)
         self._unreachable: set[int] = set()  # 已判定停用、且连查询都失败的账号
         self._replace_warned: set[int] = set()
         self._replace_lock = threading.Lock()
@@ -533,6 +534,9 @@ class Manager:
 
     def _can_auto_change(self, inst: dict, settings: dict) -> str | None:
         """返回不能自动换 IP 的原因，可以则返回 None。"""
+        n_fail, until = self._auto_fail.get(inst["id"], (0, 0))
+        if time.time() < until:
+            return f"上次自动换 IP 失败（连续 {n_fail} 次），约 {int((until - time.time()) / 60) + 1} 分钟后再试"
         cooldown = float(settings["cooldown_minutes"]) * 60
         if inst["last_change_at"] and time.time() - inst["last_change_at"] < cooldown:
             left = int((cooldown - (time.time() - inst["last_change_at"])) / 60) + 1
@@ -606,8 +610,12 @@ class Manager:
         self.db.add_event("change_ip_auto", "自动换 IP", inst["id"])
         try:
             self.change_ip(inst["id"], reason="自动-被墙")
+            self._auto_fail.pop(inst["id"], None)
         except ManagerError:
-            pass
+            n = self._auto_fail.get(inst["id"], (0, 0))[0] + 1
+            wait = min(10 * 2 ** (n - 1), 120)  # 10、20、40、80、120 分钟
+            self._auto_fail[inst["id"]] = (n, time.time() + wait * 60)
+            self._event(inst, "change_ip", f"自动换 IP 连续失败 {n} 次，{wait} 分钟后再试（避免反复申请/释放 IP）", "warn")
 
     def _process_manual(self, inst: dict, settings: dict) -> None:
         """自有服务器：没有换 IP 的 API，只做被墙检测并通知（被墙 / 恢复各通知一次）。"""
